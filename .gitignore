@@ -1,0 +1,8 @@
+
+
+bin
+obj
+*.swp
+.vs
+compile_commands.json
+
