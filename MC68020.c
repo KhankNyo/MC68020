@@ -325,7 +325,7 @@ static MC68020DataLocation GetLocation(MC68020 *M68k, unsigned DataSize, unsigne
     } break;
     case EA_ADDR_I16:
     {
-        int32_t Displacement = (int16_t)FetchImmediate(M68k, 2);
+        int32_t Displacement = SEX(32, 16)FetchImmediate(M68k, 2);
         Location.As.EffectiveAddress = M68k->Reg.Type.A[RegisterIndex].Long + Displacement;
     } break;
     case EA_INDEX:
@@ -395,7 +395,7 @@ static uint32_t GetData(MC68020 *M68k, unsigned DataSize, unsigned RegisterIndex
         M68k->Data.Long = ReadData(M68k);
     } break;   
     }
-    return M68k->Data.Long & ((uint32_t)1 << (DataSize*8 - 1));
+    return MASK(M68k->Data.Long, DataSize);
 }
 
 static bool GetFlag(MC68020 *M68k, MC68020Flags Flag)
@@ -403,24 +403,17 @@ static bool GetFlag(MC68020 *M68k, MC68020Flags Flag)
     return (M68k->SR.Raw & (1ul << Flag)) != 0;
 }
 
-static void ClearFlag(MC68020 *M68k, MC68020Flags Flag)
+static void SetFlag(MC68020 *M68k, MC68020Flags Flag, bool Condition)
 {
-    M68k->SR.Raw &= ~(1ul << Flag);
-}
-
-static void SetFlag(MC68020 *M68k, MC68020Flags Flag)
-{
-    M68k->SR.Raw |= 1ul << Flag;
+    M68k->SR.Raw |= (uint32_t)(0 != Condition) << Flag;
 }
 
 static void TestBasicFlagsOnData(MC68020 *M68k)
 {
-    if (0 == MASK(M68k->Data.Long, M68k->DataSize)) 
-        SetFlag(M68k, FLAG_Z);
-    if ((1ull << (M68k->DataSize*8 - 1)) & M68k->Data.Long) 
-        SetFlag(M68k, FLAG_N);
-    ClearFlag(M68k, FLAG_C);
-    ClearFlag(M68k, FLAG_V);
+    SetFlag(M68k, FLAG_Z, 0 == MASK(M68k->Data.Long, M68k->DataSize));
+    SetFlag(M68k, FLAG_N, M68k->Data.Long & (1ull << (M68k->DataSize*8 - 1)));
+    SetFlag(M68k, FLAG_C, 0);
+    SetFlag(M68k, FLAG_V, 0);
 }
 
 static void TestCommonAdditionFlags(MC68020 *M68k, uint32_t Result, uint32_t A, uint32_t B)
@@ -431,16 +424,12 @@ static void TestCommonAdditionFlags(MC68020 *M68k, uint32_t Result, uint32_t A, 
     Result = (Result >> SignIndex) & 0x1;
 
     /* A and B has the same sign, but both differ from result => overflow */
-    if ((A & B) ^ Result)
-    {
-        SetFlag(M68k, FLAG_V);
-    }
-    /* (A and B are negative) or (sign of result is different from B or A) => carry */
-    if ((A & B) || (Result ^ A) || (Result ^ B))
-    {
-        SetFlag(M68k, FLAG_X);
-        SetFlag(M68k, FLAG_C);
-    }
+    SetFlag(M68k, FLAG_V, (A & B & !Result) | (!A & !B & Result));
+
+    /* (A and B are negative) or (result is positive while A or B are negative) => carry */
+    bool Carry = (A & B) | ((!Result) & (A | B)) ;
+    SetFlag(M68k, FLAG_X, Carry);
+    SetFlag(M68k, FLAG_C, Carry);
 }
 
 static void TestCommonSubtractionFlags(MC68020 *M68k, uint32_t Result, uint32_t A, uint32_t B)
@@ -450,20 +439,15 @@ static void TestCommonSubtractionFlags(MC68020 *M68k, uint32_t Result, uint32_t 
     B = (B >> SignIndex) & 0x1;
     Result = (Result >> SignIndex) & 0x1;
 
-    /* TODO: bug in this comparison and Addition flag */
-    /* sign of A and B are different and Result has the same sign as subtrahend => overflow */
-    if ((A ^ B) && (B & Result))
-    {
-        SetFlag(M68k, FLAG_V);
-    }
-    /* (A and B have different sign) 
-     * or (sign of result is different from minuend)
-     * or (sign of result is the same as subtrahend) => carry */
-    if ((A ^ B) || (Result ^ B) || (Result & B))
-    {
-        SetFlag(M68k, FLAG_X);
-        SetFlag(M68k, FLAG_C);
-    }
+    /* Result and minuend has the same sign, but different from subtrahend => overflow */
+    SetFlag(M68k, FLAG_V, (Result & B & !A) | (!Result & !B & A));
+
+    /* minuend is negative and subtrahend is positive
+     * or result is negative and subtrahend is positive 
+     * or minuend and result are both negative */
+    bool Carry = (B & !A) | (Result & !A) | (B & Result);
+    SetFlag(M68k, FLAG_X, Carry);
+    SetFlag(M68k, FLAG_C, Carry);
 }
 
 static bool ConditionIsTrue(MC68020 *M68k, MC68020ConditionalCode ConditionalCode)
@@ -611,15 +595,13 @@ void MC68020Execute(MC68020 *M68k)
             {
                 IMM_OP(-);
                 TestCommonSubtractionFlags(M68k, Result, Dst, Immediate);
-                if (0 == MASK(Result, M68k->DataSize))
-                    SetFlag(M68k, FLAG_Z);
+                SetFlag(M68k, FLAG_Z, 0 == MASK(Result, M68k->DataSize));
             } break;
             case 0x3: /* ADDI */
             {
                 IMM_OP(+);
                 TestCommonAdditionFlags(M68k, Result, Dst, Immediate);
-                if (0 == MASK(Result, M68k->DataSize))
-                    SetFlag(M68k, FLAG_Z);
+                SetFlag(M68k, FLAG_Z, 0 == MASK(Result, M68k->DataSize));
             } break;
             case 0x4: /* BTST, BCHG, BCLR, BSET */
             {
@@ -661,10 +643,16 @@ void MC68020Execute(MC68020 *M68k)
         {
             if (0x1 == Mode) /* DBcc */
             {
+                uint32_t PC = M68k->PC;
                 int32_t BranchOffset = SEX(32, 16)FetchImmediate(M68k, 2);
-                if (ConditionIsTrue(M68k, GET_CC(Opcode)))
+                if (!ConditionIsTrue(M68k, GET_CC(Opcode)))
                 {
-                    M68k->PC += BranchOffset;
+                    int16_t *Dn = &M68k->Reg.Type.D[Opcode & 0x7].SWord[LOW_WORD];
+                    *Dn -= 1;
+                    if (-1 != *Dn)
+                    {
+                        M68k->PC = PC + BranchOffset;
+                    }
                 }
             }
             else /* Scc */
@@ -673,13 +661,13 @@ void MC68020Execute(MC68020 *M68k)
                 WriteDataTo(M68k, ConditionIsTrue(M68k, GET_CC(Opcode)), Location);
             }
         }
-        else
+        else /* SUBQ or ADDQ */
         {
             M68k->DataSize = TranslateSize(EncodedDataSize);
             MC68020DataLocation Location = GetLocation(M68k, M68k->DataSize, Opcode & 0x7, Mode);
             uint32_t Value = ReadDataFrom(M68k, Location);
             unsigned QuickImmediate = (Opcode >> 9) & 0x7;
-            uint32_t Result = 0;
+            uint32_t Result;
 
             if (GET_DIRECTION(Opcode)) /* SUBQ */
             {
@@ -692,15 +680,14 @@ void MC68020Execute(MC68020 *M68k)
                 TestCommonAdditionFlags(M68k, Result, Value, QuickImmediate);
             }
 
-            /* TODO: setflag semantics */
             WriteDataTo(M68k, Result, Location);
-            if (0 == MASK(Result, M68k->DataSize))
-                SetFlag(M68k, FLAG_Z);
+            SetFlag(M68k, FLAG_Z, 0 == MASK(Result, M68k->DataSize));
         }
     } break;
     case 0x6: /* Bcc, BSR, BRA */
     {
         MC68020ConditionalCode ConditionalCode = GET_CC(Opcode);
+        uint32_t PC = M68k->PC;
         int32_t BranchOffset = SEX(32, 8)(Opcode & 0xFF);
         if (0 == BranchOffset) /* 16 bit offset instead */
         {
@@ -714,11 +701,11 @@ void MC68020Execute(MC68020 *M68k)
         if (CC_F == ConditionalCode) /* BSR */
         {
             Push(M68k, M68k->PC);
-            M68k->PC += BranchOffset;
+            M68k->PC = PC + BranchOffset;
         }
         else if (ConditionIsTrue(M68k, ConditionalCode))
         {
-            M68k->PC += BranchOffset;
+            M68k->PC = PC + BranchOffset;
         }
     } break;
     case 0x9: /* SUB, SUBA, SUBX */
@@ -742,8 +729,7 @@ void MC68020Execute(MC68020 *M68k)
             /* op */
             Result = A - B - GetFlag(M68k, FLAG_X);
             TestCommonSubtractionFlags(M68k, Result, A, B);
-            if (GetFlag(M68k, FLAG_Z) && 0 == MASK(Result, M68k->DataSize)) 
-                SetFlag(M68k, FLAG_Z);
+            SetFlag(M68k, FLAG_Z, 0 == MASK(Result, M68k->DataSize) && GetFlag(M68k, FLAG_Z));
             
             WriteData(M68k, Result);
         } 
@@ -773,8 +759,7 @@ void MC68020Execute(MC68020 *M68k)
             if ((Size != SIZE_ADDR_WORD) && (Size != SIZE_ADDR_LONG)) 
             {
                 TestCommonSubtractionFlags(M68k, Result, A, B);
-                if (0 == MASK(Result, M68k->DataSize)) 
-                    SetFlag(M68k, FLAG_Z);
+                SetFlag(M68k, FLAG_Z, 0 == MASK(Result, M68k->DataSize));
             }
         }
     } break;
@@ -808,8 +793,7 @@ void MC68020Execute(MC68020 *M68k)
             /* op */
             Result = A + B;
             TestCommonAdditionFlags(M68k, Result, A, B);
-            if (GetFlag(M68k, FLAG_Z) && 0 == MASK(Result, M68k->DataSize))
-                SetFlag(M68k, FLAG_Z);
+            SetFlag(M68k, FLAG_Z, 0 == MASK(Result, M68k->DataSize) && GetFlag(M68k, FLAG_Z));
             
             WriteData(M68k, Result);
         } 
@@ -838,8 +822,7 @@ void MC68020Execute(MC68020 *M68k)
             if ((Size != SIZE_ADDR_WORD) && (Size != SIZE_ADDR_LONG)) 
             {
                 TestCommonAdditionFlags(M68k, Result, A, B);
-                if (0 == MASK(Result, M68k->DataSize))
-                    SetFlag(M68k, FLAG_Z);
+                SetFlag(M68k, FLAG_Z, 0 == MASK(Result, M68k->DataSize));
             }
         }
     } break;
