@@ -9,7 +9,7 @@ static uint8_t sMemory[10] = {
 
 int main(void)
 {
-    MC68020 m68k = MC68020Init(sMemory, sizeof sMemory);
+    MC68020 m68k = MC68020Init(sMemory, sizeof sMemory, false);
     char input = 0;
     while (input = getc(stdin), 'q' != input)
     {
