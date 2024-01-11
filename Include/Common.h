@@ -10,6 +10,8 @@
 
 #define SEX(To, From) (int##To##_t)(int##From##_t)
 
+#define STATIC_ARRAY_SIZE(Array) (sizeof(Array) / sizeof((Array)[0]))
+
 
 #if defined(__LITTLE_ENDIAN__)
 #  define HOST_IS_LITTLE_ENDIAN 1
