@@ -940,11 +940,12 @@ static void ErrorAtArgs(StringView Offender, StringView Line, const char *Fmt, v
 
     if (NULL != Assembler.ErrorStream)
     {
+        int Offset = Offender.Ptr - Line.Ptr + 1;
         fprintf(Assembler.ErrorStream, 
                 "\n%s [Line %d, %d]:\n"
                 " | '"STRVIEW_FMT"'\n"
                 " |  ", 
-                Assembler.SourceName, Assembler.LineCount, Assembler.CurrentToken.Offset,
+                Assembler.SourceName, Assembler.LineCount, Offset,
                 STRVIEW_FMT_ARG(Line)
         );
         Highlight(Offender, Line);
@@ -957,12 +958,18 @@ static void ErrorAtArgs(StringView Offender, StringView Line, const char *Fmt, v
     Assembler.Panic = true;
 }
 
+static size_t LineLen(const char *s)
+{
+    size_t i = 0;
+    while (s[i] && s[i] != '\n' && s[i] != '\r')
+        i++;
+    return i;
+}
+
 static void ErrorAtTokenArgs(const Token *Tok, const char *Fmt, va_list Args)
 {
-    StringView Line = {
-        .Ptr = Tok->Lexeme.Ptr - Tok->Offset + 1,
-        .Len = Tok->Lexeme.Len + Tok->Offset - 1,
-    };
+    StringView Line = {.Ptr = Tok->Lexeme.Ptr - Tok->Offset + 1};
+    Line.Len = LineLen(Line.Ptr);
     ErrorAtArgs(Tok->Lexeme, Line, Fmt, Args);
 }
 
@@ -992,10 +999,8 @@ static void ErrorAtExpr(const char *Fmt, ...)
         UNREACHABLE("Must have an expression before %s", __func__);
     }
 
-    StringView Line = {
-        .Ptr = Current->Str.Ptr - Current->Offset + 1,
-        .Len = Current->Str.Len + Current->Offset - 1,
-    };
+    StringView Line = {.Ptr = Current->Str.Ptr - Current->Offset + 1};
+    Line.Len = LineLen(Line.Ptr);
     ErrorAtArgs(Current->Str, Line, Fmt, Args);
     va_end(Args);
 }
@@ -1071,10 +1076,7 @@ static Value Factor(void)
     case TOKEN_LPAREN:
     {
         Value Val = ConstExpr();
-        if (!ConsumeIfNextTokenIs(TOKEN_RPAREN))
-        {
-            ErrorAtExpr("Expected ')' after expression.");
-        }
+        ConsumeOrError(TOKEN_RPAREN, "Expected ')' after expression.");
         return Val;
     } break;
     default:
