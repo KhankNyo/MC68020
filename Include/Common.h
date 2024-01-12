@@ -7,10 +7,19 @@
 
 #define MASK(Value, Size) \
     ((Value) & ((1ull << (Size)) - 1))
-
 #define SEX(To, From) (int##To##_t)(int##From##_t)
-
 #define STATIC_ARRAY_SIZE(Array) (sizeof(Array) / sizeof((Array)[0]))
+
+#define strfy_1(Expression) #Expression
+#define STRFY(Expression) strfy_1(Expression)
+#define DIE() (*(volatile char *)0 = 0)
+#define UNREACHABLE(...) do {\
+    fprintf(stderr, __FILE__": Unreachable on line "STRFY(__LINE__)":\n    "\
+            __VA_ARGS__\
+    );\
+    fputc('\n', stderr);\
+    DIE();\
+} while (0)
 
 
 #if defined(__LITTLE_ENDIAN__)
@@ -49,6 +58,18 @@
 #  define HOST_IS_LITTLE_ENDIAN 0
 #endif
 
+
+
+static inline unsigned CountBits(uint64_t n)
+{
+    unsigned i = 0;
+    while (n)
+    {
+        n &= n - 1;
+        i++;
+    }
+    return i;
+}
 
 
 #endif /* COMMON_H */

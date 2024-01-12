@@ -49,12 +49,19 @@ int main(int argc, char **argv)
     }
     const char *FileName = argv[1];
     char *Source = ReadFile(FileName);
-    MC68020MachineCode Memory = MC68020Assemble(FileName, Source, stderr);
+    MC68020MachineCode Memory = MC68020Assemble(FileName, Source, false, stderr);
+    free(Source);
     if (NULL == Memory.Buffer)
     {
         return 1;
     }
-    free(Source);
+    for (int i = 0; i < (int)Memory.Size; i++)
+    {
+        if (i % 8 == 0)
+            fprintf(stderr, "\n%6d: ", i);
+        fprintf(stderr, "%03o ", Memory.Buffer[i]);
+    }
+    return 0;
 
     MC68020 m68k = MC68020Init(Memory.Buffer, Memory.Capacity, false);
     char input = 0;
@@ -62,6 +69,7 @@ int main(int argc, char **argv)
     {
         MC68020Execute(&m68k);
     }
+    /* TODO: free Memory */
     return 0;
 }
 

@@ -1,7 +1,9 @@
 
 #include "Common.h"
 #include "Assembler.h"
+
 #include <stdarg.h>
+#include <stdlib.h>
 
 
 
@@ -37,6 +39,8 @@ typedef enum TokenType
     TOKEN_DATA_REG,
     TOKEN_PC,
     TOKEN_SP, 
+    TOKEN_CCR,
+    TOKEN_SR,
 
     /* instructions */
     TOKEN_ABCD,
@@ -181,16 +185,89 @@ typedef struct Value
     } As;
 } Value;
 
+
+typedef enum ArgumentType 
+{
+    ARG_INVALID = 0,
+    ARG_IMMEDIATE,  /* #Imm */
+    ARG_ADDR,       /* Abs Addr */
+    ARG_DATA_REG,   /* Dn */
+    ARG_ADDR_REG,   /* An */
+    ARG_IND_REG,    /* (An) */
+    ARG_IND_PREDEC, /* -(An) */
+    ARG_IND_POSTINC,/* (An)+ */
+    ARG_IND_I16,    /* (I16, An) */
+    ARG_IDX_I8,     /* (I8, An, Xn) */
+    ARG_IDX_BD,     /* (Bd, An, Xn) */
+    ARG_MEM_PRE,    /* ([Bd, An, Xn], Od) */
+    ARG_MEM_POST,   /* ([Bd, An], Xn, Od) */
+} ArgumentType;
+typedef struct XnReg /* n >= 8 for Address reg */ 
+{
+    uint8_t Size, n, Scale;
+} XnReg;
+typedef struct Argument 
+{
+    ArgumentType Type;
+    union {
+        uint32_t An, Dn;
+        uint32_t Addr, Immediate;
+        struct {
+            uint32_t An;
+        } PreDec, PostInc;
+        struct {
+            int32_t Displacement;
+            uint32_t An;
+            XnReg X;
+        } Ind;
+        struct {
+            uint32_t An;
+            int8_t I8;
+            XnReg X;
+        } IdxI8;
+        struct {
+            int32_t Bd;
+            int32_t Od;
+            uint8_t An;
+            XnReg X;
+        } Mem, Idx;
+    } As;
+} Argument;
+#define ARGUMENT(Typ, ...) (Argument) {.Type = Typ, __VA_ARGS__}
+#define NO_REG 17
+
+
+typedef struct EaEncoding 
+{
+    uint8_t ModeReg;
+    uint8_t RegMode;
+    uint16_t Extension;
+    bool HasImmediate;
+    union {
+        uint32_t Immediate;
+        uint32_t BaseDisplacement;
+    } u;
+    uint32_t OuterDisplacement;
+} EaEncoding;
+#define NO_EXTENSION 0xFFFF
+
 typedef struct Token 
 {
     StringView Lexeme;
-    TokenType Type;
     int Line, Offset;
+    TokenType Type;
     TokenData Data;
 } Token;
 
+typedef struct Expression
+{
+    StringView Str;
+    int Line, Offset;
+} Expression;
+
 static struct 
 {
+    void (*Emit)(uint8_t *, uint64_t, unsigned);
     bool Error, Panic;
     const char *SourceName;
     FILE *ErrorStream;
@@ -200,6 +277,7 @@ static struct
     Token CurrentToken, NextToken;
 
     MC68020MachineCode MachineCode;
+
     size_t IdenCount;
     StringView Idens[1048];
     uint32_t IsFloat[1048/32];
@@ -207,12 +285,18 @@ static struct
         uint64_t Int;
         double Flt;
     } IdenData[1048];
+
+    size_t ExprCount;
+    Expression Expr[1048];
 } Assembler;
 
 
 
 #define TO_UPPER(Ch) ((Ch) & ~(1 << 5))
 #define IN_RANGE(lower, n, upper) ((lower) <= (n) && (n) <= (upper))
+#define IN_I8(n) IN_RANGE(INT8_MIN, (int64_t)(n), INT8_MAX)
+#define IN_I16(n) IN_RANGE(INT16_MIN, (int64_t)(n), INT16_MAX)
+#define IN_I32(n) IN_RANGE(INT32_MIN, (int64_t)(n), INT32_MAX)
 #define INS_COUNT (TOKEN_UNPK - TOKEN_ABCD)
 
 static bool IsAtEnd(void)
@@ -817,10 +901,11 @@ static bool NoMoreToken(void)
     return TOKEN_EOF == Assembler.CurrentToken.Type;
 }
 
-static void ConsumeToken(void)
+static TokenType ConsumeToken(void)
 {
     Assembler.CurrentToken = Assembler.NextToken;
     Assembler.NextToken = Tokenize();
+    return Assembler.CurrentToken.Type;
 }
 
 static bool ConsumeIfNextTokenIs(TokenType Type)
@@ -848,47 +933,83 @@ static void Highlight(StringView Offender, StringView Line)
     }
 }
 
-static void ErrorArgs(const char *Fmt, va_list Args)
+static void ErrorAtArgs(StringView Offender, StringView Line, const char *Fmt, va_list Args)
 {
     if (Assembler.Panic)
         return;
 
-    StringView OffendingExpr = Assembler.CurrentToken.Lexeme;
-    StringView Line = {
-        .Ptr = OffendingExpr.Ptr - Assembler.CurrentToken.Offset + 1,
-        .Len = OffendingExpr.Len + Assembler.CurrentToken.Offset - 1,
-    };
-    fprintf(Assembler.ErrorStream, 
-            "\n%s [Line %d, %d]:\n"
-            " | '"STRVIEW_FMT"'\n"
-            " |  ", 
-            Assembler.SourceName, Assembler.LineCount, Assembler.CurrentToken.Offset,
-            STRVIEW_FMT_ARG(Line)
-    );
-    Highlight(OffendingExpr, Line);
-    fprintf(Assembler.ErrorStream, "\n | Error: ");
-    vfprintf(Assembler.ErrorStream, Fmt, Args);
-    fputc('\n', Assembler.ErrorStream);
+    if (NULL != Assembler.ErrorStream)
+    {
+        fprintf(Assembler.ErrorStream, 
+                "\n%s [Line %d, %d]:\n"
+                " | '"STRVIEW_FMT"'\n"
+                " |  ", 
+                Assembler.SourceName, Assembler.LineCount, Assembler.CurrentToken.Offset,
+                STRVIEW_FMT_ARG(Line)
+        );
+        Highlight(Offender, Line);
+        fprintf(Assembler.ErrorStream, "\n | Error: ");
+        vfprintf(Assembler.ErrorStream, Fmt, Args);
+        fputc('\n', Assembler.ErrorStream);
+    }
 
     Assembler.Error = true;
     Assembler.Panic = true;
+}
+
+static void ErrorAtTokenArgs(const Token *Tok, const char *Fmt, va_list Args)
+{
+    StringView Line = {
+        .Ptr = Tok->Lexeme.Ptr - Tok->Offset + 1,
+        .Len = Tok->Lexeme.Len + Tok->Offset - 1,
+    };
+    ErrorAtArgs(Tok->Lexeme, Line, Fmt, Args);
 }
 
 static void Error(const char *Fmt, ...)
 {
     va_list Args;
     va_start(Args, Fmt);
-    ErrorArgs(Fmt, Args);
+    ErrorAtTokenArgs(&Assembler.CurrentToken, Fmt, Args);
     va_end(Args);
 }
 
+static void ErrorAtToken(const Token *Tok, const char *Fmt, ...)
+{
+    va_list Args;
+    va_start(Args, Fmt);
+    ErrorAtTokenArgs(Tok, Fmt, Args);
+    va_end(Args);
+}
+
+static void ErrorAtExpr(const char *Fmt, ...)
+{
+    va_list Args;
+    va_start(Args, Fmt);
+    const Expression *Current = &Assembler.Expr[Assembler.ExprCount - 1];
+    if (0 == Assembler.ExprCount)
+    {
+        UNREACHABLE("Must have an expression before %s", __func__);
+    }
+
+    StringView Line = {
+        .Ptr = Current->Str.Ptr - Current->Offset + 1,
+        .Len = Current->Str.Len + Current->Offset - 1,
+    };
+    ErrorAtArgs(Current->Str, Line, Fmt, Args);
+    va_end(Args);
+}
+
+
+/* returns true if the next token's type is the same as Type
+ * else does not consume the token */
 static bool ConsumeOrError(TokenType Type, const char *Fmt, ...)
 {
     if (!ConsumeIfNextTokenIs(Type))
     {
         va_list Args;
         va_start(Args, Fmt);
-        ErrorArgs(Fmt, Args);
+        ErrorAtTokenArgs(&Assembler.NextToken, Fmt, Args);
         va_end(Args);
         return false;
     }
@@ -922,8 +1043,7 @@ static Value ConstExpr(void);
 
 static Value Factor(void)
 {
-    ConsumeToken();
-    switch (Assembler.CurrentToken.Type)
+    switch (ConsumeToken())
     {
     case TOKEN_LIT_INT: return (Value) { .As.Int = Assembler.CurrentToken.Data.Int };
     case TOKEN_LIT_FLT: return (Value) { .As.Flt = Assembler.CurrentToken.Data.Flt, .IsFloat = true };
@@ -951,7 +1071,10 @@ static Value Factor(void)
     case TOKEN_LPAREN:
     {
         Value Val = ConstExpr();
-        ConsumeOrError(TOKEN_RPAREN, "Expected ')' after expression.");
+        if (!ConsumeIfNextTokenIs(TOKEN_RPAREN))
+        {
+            ErrorAtExpr("Expected ')' after expression.");
+        }
         return Val;
     } break;
     default:
@@ -1113,25 +1236,41 @@ static Value ExprOr(void)
 
 static Value ConstExpr(void)
 {
-    return ExprOr();
+    if (Assembler.ExprCount > STATIC_ARRAY_SIZE(Assembler.Expr))
+    {
+        UNREACHABLE("TODO: make expr array dynamic %s", __func__);
+    }
+    Expression Expr = {
+        .Str = Assembler.NextToken.Lexeme,
+        .Line = Assembler.LineCount,
+        .Offset = Assembler.NextToken.Offset,
+    };
+
+    Value Val = ExprOr();
+
+    Expr.Str.Len = 
+        Assembler.CurrentToken.Lexeme.Ptr + Assembler.CurrentToken.Lexeme.Len 
+        - Expr.Str.Ptr;
+    Assembler.Expr[Assembler.ExprCount++] = Expr;
+    return Val;
 }
 
 
 static void PushSymbol(const Token *Sym, Value Val)
 {
-    if (Assembler.IdenCount < STATIC_ARRAY_SIZE(Assembler.Idens))
+    if (Assembler.IdenCount >= STATIC_ARRAY_SIZE(Assembler.Idens))
+        UNREACHABLE("TODO: make Symbol table synamic");
+
+    unsigned i = Assembler.IdenCount++;
+    Assembler.Idens[i] = Sym->Lexeme;
+    if (Val.IsFloat)
     {
-        unsigned i = Assembler.IdenCount++;
-        Assembler.Idens[i] = Sym->Lexeme;
-        if (Val.IsFloat)
-        {
-            Assembler.IsFloat[i/32] |= 1ul << (i % 32);
-            Assembler.IdenData[i].Flt = Val.As.Flt;
-        }
-        else 
-        {
-            Assembler.IdenData[i].Int = Val.As.Int;
-        }
+        Assembler.IsFloat[i/32] |= 1ul << (i % 32);
+        Assembler.IdenData[i].Flt = Val.As.Flt;
+    }
+    else 
+    {
+        Assembler.IdenData[i].Int = Val.As.Int;
     }
 }
 
@@ -1159,46 +1298,501 @@ static void DeclStmt(void)
 }
 
 
-static void ConsumeStatement(void)
+
+
+static unsigned ConsumeSizeSpecifier(void)
 {
-    ConsumeToken();
-    if (TOKEN_IDENTIFIER == Assembler.CurrentToken.Type)
+    unsigned Size = 0;
+    ConsumeOrError(TOKEN_IDENTIFIER, "Expected operand size specifier.");
+    Token Letter = Assembler.CurrentToken;
+    if (Letter.Lexeme.Len != 1)
+        goto UnknownSize;
+
+    switch (TO_UPPER(Letter.Lexeme.Ptr[0]))
     {
-        DeclStmt();
+    case 'L': Size = 4; break;
+    case 'W': Size = 2; break;
+    case 'B': Size = 1; break;
+    UnknownSize:
+    default: Error("Expected operand size to be 'w', 'l' or 'b'.");
     }
-    else while (!NoMoreToken() && Assembler.CurrentToken.Line == Assembler.NextToken.Line)
+    return Size;
+}
+
+static XnReg ConsumeXn(void)
+{
+    XnReg X = { 0 };
+    if (ConsumeIfNextTokenIs(TOKEN_ADDR_REG))
+    {
+        X.n = Assembler.CurrentToken.Data.Int + 8;
+    }
+    else if (ConsumeOrError(TOKEN_DATA_REG, "Expected register name."))
+    {
+        X.n = Assembler.CurrentToken.Data.Int;
+    }
+
+    if (ConsumeIfNextTokenIs(TOKEN_DOT))
+    {
+        X.Size = ConsumeSizeSpecifier();
+        if (X.Size == 1)
+        {
+            Error("Cannot use byte size specifier for index register.");
+        }
+    }
+
+    if (ConsumeIfNextTokenIs(TOKEN_STAR))
+    {
+        Value Scale = ConstExpr();
+        if (Scale.IsFloat)
+            ErrorAtExpr("Cannot use floating-point number as scale factor.");
+
+        if (Scale.As.Int != 1 && Scale.As.Int != 2 
+        && Scale.As.Int != 4 && Scale.As.Int != 8)
+        {
+            ErrorAtExpr("Scale factor must be 1, 2, 4, or 8.");
+        }
+        X.Scale = CountBits(Scale.As.Int - 1);
+    }
+    return X;
+}
+
+/* '(' is the current token */
+static Argument IndirectAddressingMode(void)
+{
+    if (ConsumeIfNextTokenIs(TOKEN_LBRACE)) /* ([...] ...) */
+    {
+        UNREACHABLE("TODO: Mem addrm");
+        return (Argument) { 0 };
+    }
+    else if (ConsumeIfNextTokenIs(TOKEN_ADDR_REG)) /* (An ...)... */
+    {
+        unsigned An = Assembler.CurrentToken.Data.Int;
+        if (ConsumeIfNextTokenIs(TOKEN_COMMA)) /* (An, Xn) */
+        {
+            XnReg Xn = ConsumeXn();
+            ConsumeOrError(TOKEN_RPAREN, "Expected ')' after index.");
+            return ARGUMENT(
+                ARG_IDX_I8,
+                .As.IdxI8 = {
+                    .An = An,
+                    .X = Xn,
+                    .I8 = 0,
+                }
+            );
+        }
+        ConsumeOrError(TOKEN_RPAREN, "Expected ')' or ','."); /* (An)... */
+        if (ConsumeIfNextTokenIs(TOKEN_PLUS)) /* (An)+ */
+        {
+            return ARGUMENT(
+                ARG_IND_POSTINC,
+                .As.PostInc.An = An
+            );
+        }
+
+        /* (An) */
+        return ARGUMENT(
+            ARG_IND_REG,
+            .As.Ind.An = An
+        );
+    }
+    else /* (Expr ...) */
+    {
+        Value Displacement = ConstExpr();
+        if (Displacement.IsFloat)
+            ErrorAtExpr("Displacement cannot be a floating-point number.");
+
+        if (ConsumeIfNextTokenIs(TOKEN_RPAREN)) /* (Expr) */
+        {
+            return ARGUMENT(
+                ARG_ADDR,
+                .As.Addr = Displacement.As.Int
+            );
+        } 
+
+        /* (Expr, An ...) */
+        ConsumeOrError(TOKEN_COMMA, "Expected ')' or ',' after expression.");
+        ConsumeOrError(TOKEN_ADDR_REG, "Expected address register.");
+        unsigned An = Assembler.CurrentToken.Data.Int;
+        if (ConsumeIfNextTokenIs(TOKEN_COMMA)) /* (Expr, An, Xn) */
+        {
+            XnReg Xn = ConsumeXn();
+            ConsumeOrError(TOKEN_RPAREN, "Expected ')' after index.");
+            if (IN_I8((int64_t)Displacement.As.Int))
+            {
+                return ARGUMENT(
+                    ARG_IDX_I8,
+                    .As.IdxI8 = {
+                        .An = An,
+                        .X = Xn,
+                        .I8 = Displacement.As.Int
+                    }
+                );
+            }
+            return ARGUMENT(
+                ARG_IDX_BD,
+                .As.Idx = {
+                    .Bd = Displacement.As.Int,
+                    .An = An,
+                    .X = Xn
+                }
+            );
+        }
+        /* (Expr, An) */
+        ConsumeOrError(TOKEN_RPAREN, "Expected ')' or ','.");
+        if (IN_I16(Displacement.As.Int))
+        {
+            return ARGUMENT(
+                ARG_IND_I16,
+                .As.Ind = {
+                    .An = An,
+                    .X.n = NO_REG,
+                    .Displacement = Displacement.As.Int,
+                },
+            );
+        }
+        return ARGUMENT(
+            ARG_IDX_BD,
+            .As.Idx = {
+                .An = An,
+                .X.n = NO_REG,
+                .Bd = Displacement.As.Int
+            }
+        );
+    }
+}
+
+static Argument ConsumeInstructionArgument(unsigned Size)
+{
+    switch (ConsumeToken())
+    {
+    default:                /* Addr */
+    {
+        Value Address = ConstExpr();
+        if (Address.IsFloat)
+        {
+            Error("Address cannot be a floating-point number.");
+        }
+        return ARGUMENT(
+            ARG_ADDR,
+            .As.Addr = Address.As.Int
+        );
+    } break;
+    case TOKEN_POUND:       /* #Imm */
+    {
+        Value Immediate = ConstExpr();
+        if (Immediate.IsFloat)
+        {
+            Error("Invalid floating-point immediate.");
+        }
+        return ARGUMENT(
+            ARG_IMMEDIATE,
+            .As.Immediate = Immediate.As.Int
+        );
+    } break;
+    case TOKEN_ADDR_REG:    /* An */
+    {
+        if (1 == Size)
+        {
+            Error("Byte size specifier is not applicable to address register.");
+        }
+        return ARGUMENT(
+            ARG_ADDR_REG,
+            .As.An = Assembler.CurrentToken.Data.Int
+        );
+    } break;
+    case TOKEN_DATA_REG:    /* Dn */
+    {
+        return ARGUMENT(
+            ARG_DATA_REG,
+            .As.Dn = Assembler.CurrentToken.Data.Int
+        );
+    } break;
+    case TOKEN_LPAREN:      /* (...) */
+    {
+        return IndirectAddressingMode();
+    } break;
+    case TOKEN_MINUS:
+    {
+        ConsumeOrError(TOKEN_LPAREN, "Expected '(' after '-'.");
+        ConsumeOrError(TOKEN_ADDR_REG, "Expected address register for pre-decrement addressing mode.");
+        return ARGUMENT(
+            ARG_IND_PREDEC,
+            .As.PreDec.An = Assembler.CurrentToken.Data.Int
+        );
+        ConsumeOrError(TOKEN_RPAREN, "Expected ')' after register.");
+    } break;
+    }
+}
+
+static Argument ConsumeImmediate(void)
+{
+    ConsumeOrError(TOKEN_POUND, "Expected '#'.");
+    Value Immediate = ConstExpr();
+    if (Immediate.IsFloat)
+        ErrorAtExpr("Immediate must be an integer.");
+
+    return ARGUMENT(
+        ARG_IMMEDIATE,
+        .As.Immediate = Immediate.As.Int,
+    );
+}
+
+
+static unsigned EncodeExtensionSize(uint32_t Displacement)
+{
+    if (0 == Displacement)
+        return 1;
+    if (IN_I16(Displacement))
+        return 2;
+    return 3;
+}
+
+static EaEncoding EncodeEa(Argument Arg, unsigned Size)
+{
+#define ENCODE_FULL_EXTENSION(Xn, WL, SCALE, BS, IS, BD_SIZE, I)\
+    ( ((uint32_t)((Xn)        & 0xF) << 12)\
+    | ((uint32_t)((WL)        & 0x1) << 11)\
+    | ((uint32_t)((SCALE)     & 0x3) << 9)\
+    | 0x100\
+    | ((uint32_t)((BS)        & 0x1) << 7)\
+    | ((uint32_t)((IS)        & 0x1) << 6)\
+    | ((uint32_t)((BD_SIZE)   & 0x3) << 4)\
+    | ((uint32_t)(I)          & 0x7)) 
+#define ENCODE_BRIEF_EXTENSION(Xn, WL, SCALE, Imm8)\
+    ( ((uint32_t)((Xn)        & 0xF) << 12)\
+    | ((uint32_t)((WL)        & 0x1) << 11)\
+    | ((uint32_t)((SCALE)     & 0x3) << 9)\
+    | 0x000\
+    | ((uint32_t)(Imm8)       & 0xFF)) 
+
+    EaEncoding Encoding = {
+        .Extension = NO_EXTENSION,
+    };
+    switch (Arg.Type)
+    {
+    case ARG_DATA_REG:      Encoding.ModeReg = 000 + Arg.As.Dn; break;
+    case ARG_ADDR_REG:      Encoding.ModeReg = 010 + Arg.As.An; break;
+    case ARG_IND_REG:       Encoding.ModeReg = 020 + Arg.As.Ind.An; break;
+    case ARG_IND_POSTINC:   Encoding.ModeReg = 030 + Arg.As.PostInc.An; break;
+    case ARG_IND_PREDEC:    Encoding.ModeReg = 040 + Arg.As.PreDec.An; break;
+    case ARG_IND_I16:       Encoding.ModeReg = 050 + Arg.As.Ind.An; break;
+    case ARG_MEM_POST:
+    {
+        Encoding.Extension = ENCODE_FULL_EXTENSION(
+            Arg.As.Mem.X.n,
+            Arg.As.Mem.X.Size == 4,
+            Arg.As.Mem.X.Scale,
+            Arg.As.Mem.Bd == 0,
+            Arg.As.Mem.X.n == NO_REG,
+            EncodeExtensionSize(Arg.As.Mem.Bd),
+            EncodeExtensionSize(Arg.As.Mem.Od)
+        );
+        Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
+        Encoding.OuterDisplacement = Arg.As.Mem.Od;
+        Encoding.ModeReg = 060 + Arg.As.Ind.An;
+    } break;
+    case ARG_MEM_PRE:
+    {
+        Encoding.Extension = ENCODE_FULL_EXTENSION(
+            Arg.As.Mem.X.n,
+            Arg.As.Mem.X.Size == 4,
+            Arg.As.Mem.X.Scale,
+            Arg.As.Mem.Bd == 0,
+            Arg.As.Mem.X.n == NO_REG,
+            EncodeExtensionSize(Arg.As.Mem.Bd),
+            04 + EncodeExtensionSize(Arg.As.Mem.Od)
+        );
+        Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
+        Encoding.OuterDisplacement = Arg.As.Mem.Od;
+        Encoding.ModeReg = 060 + Arg.As.Ind.An;
+    } break;
+    case ARG_IDX_BD:
+    {
+        Encoding.Extension = ENCODE_FULL_EXTENSION(
+            Arg.As.Mem.X.n,
+            Arg.As.Mem.X.Size == 4,
+            Arg.As.Mem.X.Scale,
+            Arg.As.Mem.Bd == 0,
+            Arg.As.Mem.X.n == NO_REG,
+            EncodeExtensionSize(Arg.As.Mem.Bd),
+            0
+        );
+        Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
+        Encoding.OuterDisplacement = Arg.As.Mem.Od;
+        Encoding.ModeReg = 060 + Arg.As.Ind.An;
+    } break;
+    case ARG_IDX_I8:        
+    {
+        Encoding.Extension = ENCODE_BRIEF_EXTENSION(
+            Arg.As.IdxI8.X.n,
+            Arg.As.IdxI8.X.Size == 4,
+            Arg.As.IdxI8.X.Scale,
+            Arg.As.IdxI8.I8
+        );
+        Encoding.ModeReg = 060 + Arg.As.IdxI8.An;
+    } break;
+    case ARG_ADDR:          
+    {
+        Encoding.ModeReg = 070 + (Size == 4);
+        Encoding.HasImmediate = true;
+        Encoding.u.Immediate = Arg.As.Addr;
+    } break;
+    case ARG_IMMEDIATE:
+    {
+        Encoding.ModeReg = 074;
+        Encoding.HasImmediate = true;
+        Encoding.u.Immediate = Arg.As.Immediate;
+    } break;
+
+    case ARG_INVALID: DIE(); break;
+    }
+    return Encoding;
+#undef ENCODE_BRIEF_EXTENSION
+#undef ENCODE_FULL_EXTENSION
+}
+
+
+
+
+
+
+static void LittleEndianEmitter(uint8_t *Buffer, uint64_t Data, unsigned Size)
+{
+    for (unsigned i = 0; i < Size; i++)
+    {
+        *Buffer++ = Data >> i*8;
+    }
+}
+
+static void BigEndianEmitter(uint8_t *Buffer, uint64_t Data, unsigned Size)
+{
+    for (int i = Size - 1; i >= 0; i--)
+    {
+        *Buffer++ = Data >> i*8;
+    }
+}
+
+static void Emit(uint64_t Data, unsigned Size)
+{
+    if (Assembler.MachineCode.Size + Size >= Assembler.MachineCode.Capacity)
+    {
+        Assembler.MachineCode.Capacity = (Assembler.MachineCode.Capacity + Size)*2;
+        Assembler.MachineCode.Buffer = realloc(Assembler.MachineCode.Buffer, Assembler.MachineCode.Capacity);
+        if (NULL == Assembler.MachineCode.Buffer)
+            UNREACHABLE("realloc failed");
+    }
+    Assembler.Emit(&Assembler.MachineCode.Buffer[Assembler.MachineCode.Size], Data, Size);
+    Assembler.MachineCode.Size += Size;
+}
+
+static void EmitEaExtension(EaEncoding Encoding)
+{
+    if (Encoding.HasImmediate)
+        Emit(Encoding.u.Immediate, IN_I16(Encoding.u.Immediate) ? 2 : 4);
+    if (Encoding.Extension == NO_EXTENSION)
+        return;
+
+    Emit(Encoding.Extension, 2);
+    if (Encoding.u.BaseDisplacement)
+    {
+        Emit(Encoding.u.BaseDisplacement, IN_I16(Encoding.u.BaseDisplacement) ? 2 : 4);
+    }
+    if (Encoding.OuterDisplacement)
+    {
+        Emit(Encoding.OuterDisplacement, IN_I16(Encoding.OuterDisplacement) ? 2 : 4);
+    }
+}
+
+static void Unpanic(void)
+{
+    Assembler.Panic = false;
+    while (!NoMoreToken() && Assembler.CurrentToken.Line == Assembler.NextToken.Line)
     {
         ConsumeToken();
     }
-    Assembler.Panic = false;
 }
 
-MC68020MachineCode MC68020Assemble(const char *SourceName, const char *Source, FILE *ErrorStream)
+static unsigned ConsumeSize(void)
 {
+    unsigned Size = 2;
+    if (ConsumeIfNextTokenIs(TOKEN_DOT))
+        Size = ConsumeSizeSpecifier();
+    return Size;
+}
+
+static void ConsumeStatement(void)
+{
+    Token Current = Assembler.NextToken;
+    switch (ConsumeToken())
+    {
+    case TOKEN_IDENTIFIER:
+    {
+        DeclStmt();
+    } break;
+    case TOKEN_ADDI:
+    {
+        unsigned Size = ConsumeSize();
+        Argument Src = ConsumeImmediate();
+        ConsumeOrError(TOKEN_COMMA, "Expected ',' after immediate.");
+        Argument Dst = ConsumeInstructionArgument(Size);
+        switch (Dst.Type)
+        {
+        case ARG_IMMEDIATE:
+        case ARG_ADDR_REG:
+        {
+            ErrorAtToken(&Current, "Invalid addressing mode for addi.");
+        } break;
+        default:
+        {
+            EaEncoding Encoding = EncodeEa(Dst, Size);
+
+            Emit((0x6 << 8)
+                | (CountBits(Size - 1) << 6)
+                | Encoding.ModeReg,
+                2
+            );
+            Emit(Src.As.Immediate, Size);
+            EmitEaExtension(Encoding);
+        } break;
+        }
+    } break;
+    }
+    if (Assembler.Panic)
+    {
+        Unpanic();
+    }
+}
+
+MC68020MachineCode MC68020Assemble(
+        const char *SourceName, const char *Source, bool LittleEndian, FILE *ErrorStream)
+{
+    Assembler.Emit = LittleEndian? LittleEndianEmitter : BigEndianEmitter;
     Assembler.LineStart = Source;
     Assembler.StartPtr = Source;
     Assembler.CurrPtr = Source;
     Assembler.ErrorStream = ErrorStream;
     Assembler.Error = false;
     Assembler.Panic = false;
-    Assembler.MachineCode = (MC68020MachineCode) { 0 };
     Assembler.SourceName = SourceName;
     Assembler.LineCount = 1;
     Assembler.IdenCount = 0;
+    Assembler.ExprCount = 0;
+    Assembler.MachineCode = (MC68020MachineCode) { 
+        .Size = 0,
+        .Capacity = 256,
+        .Buffer = malloc(256)
+    };
+    if (NULL == Assembler.MachineCode.Buffer)
+    {
+        Error("Malloc failed.");
+        return Assembler.MachineCode;
+    }
 
     Assembler.NextToken = (Token) { 0 };
     ConsumeToken();
     while (!NoMoreToken())
     {
         ConsumeStatement();
-    }
-    for (size_t i = 0; i < Assembler.IdenCount; i++)
-    {
-        printf(STRVIEW_FMT" = ", STRVIEW_FMT_ARG(Assembler.Idens[i]));
-        if (Assembler.IsFloat[i / 32] & (1ul << (i % 32)))
-            printf("%f\n", Assembler.IdenData[i].Flt);
-        else
-            printf("%lld\n", Assembler.IdenData[i].Int);
     }
     return Assembler.MachineCode;
 }

@@ -3,6 +3,7 @@
 
 
 #include <stdio.h>
+#include <stdbool.h>
 
 typedef struct MC68020MachineCode 
 {
@@ -14,7 +15,10 @@ typedef struct MC68020MachineCode
 /* Source must be null-terminated,
  * Buffer will be NULL if an error was encountered,
  * if ErrorStream is NULL, no error will be emitted */
-MC68020MachineCode MC68020Assemble(const char *SourceName, const char *Source, FILE *ErrorStream);
+MC68020MachineCode MC68020Assemble(
+        const char *SourceName, const char *Source, 
+        bool LittleEndian, FILE *ErrorStream
+);
 
 
 
