@@ -816,7 +816,7 @@ static Token ConsumeIdentifier(char FirstLetter)
     /* SP, Scc? */
     if ('S' == UpperFirst && IN_RANGE(2, Len, 3))
     {
-        if ('P' == UpperSecond)
+        if ('P' == UpperSecond && 2 == Len)
         {
             return MakeTokenWith(TOKEN_ADDR_REG, 
                 .Int = 7 /* SP, A7 */
@@ -1761,7 +1761,7 @@ NoOuterDisplacement:
 
 
 
-static Argument ConsumeInstructionArgument(unsigned InstructionSize)
+static Argument ConsumeEa(unsigned InstructionSize)
 {
     switch (ConsumeToken())
     {
@@ -2103,6 +2103,33 @@ static void IgnoreSize(const Token *Instruction)
     }
 }
 
+/* index corresponding to register */
+static uint16_t ConsumeRegisterList(bool PreDec)
+{
+    uint16_t List = 0;
+    ConsumeOrError(TOKEN_LCURLY, "Expected '{' before register list.");
+    do {
+        unsigned Index = 0;
+        if (ConsumeIfNextTokenIs(TOKEN_ADDR_REG))
+        {
+            Index = Assembler.CurrentToken.Data.Int + 8;
+        }
+        else if (ConsumeIfNextTokenIs(TOKEN_DATA_REG))
+        {
+            Index = Assembler.CurrentToken.Data.Int;
+        }
+        else
+        {
+            Error("Expected address or data register.");
+        }
+
+        List |= PreDec? 
+            1 << (15 - Index)
+            : 1 << Index;
+    } while (ConsumeIfNextTokenIs(TOKEN_COMMA));
+    ConsumeOrError(TOKEN_RCURLY, "Expected '}' after register list.");
+    return List;
+}
 
 static void ConsumeStatement(void)
 {
@@ -2128,10 +2155,15 @@ static void ConsumeStatement(void)
     Token Instruction = Assembler.CurrentToken;
     switch (Type)
     {
+    default:
+    {
+        Error("Expected instruction, variable, label, or directive.");
+    } break;
     case TOKEN_IDENTIFIER:
     {
         DeclStmt();
     } break;
+    case TOKEN_EOF: break;
     case TOKEN_ADDI:
     case TOKEN_ANDI:
     case TOKEN_CMPI:
@@ -2142,7 +2174,7 @@ static void ConsumeStatement(void)
         unsigned Size = ConsumeSize();
         Argument Src = ConsumeImmediate();
         CONSUME_COMMA();
-        Argument Dst = ConsumeInstructionArgument(4);
+        Argument Dst = ConsumeEa(4);
 
         if (ARG_IMMEDIATE == Dst.Type || ARG_ADDR_REG == Dst.Type || ADDRM_USE_PC(Dst.Type))
         {
@@ -2158,17 +2190,46 @@ static void ConsumeStatement(void)
         Emit(Src.As.Immediate, Size == 1? 2 : Size);
         EmitEaExtension(Ea);
     } break;
+    case TOKEN_ADDQ:
+    case TOKEN_SUBQ:
+    {
+        unsigned Size = ConsumeSize();
+        Argument Src = ConsumeImmediate();
+        CONSUME_COMMA();
+        Argument Dst = ConsumeEa(2);
+
+        if (ARG_IMMEDIATE == Dst.Type || ADDRM_USE_PC(Dst.Type))
+        {
+            ErrorInvalidAddrMode(&Instruction, Dst.Type, "destination");
+        }
+        if (Src.As.Immediate > 8)
+        {
+            ErrorAtToken(&Instruction, 
+                    "Immediate is too big for '"STRVIEW_FMT"'.", STRVIEW_FMT_ARG(Instruction.Lexeme)
+            );
+        }
+
+        EaEncoding Ea = EncodeEa(Dst);
+        Emit(0x5000
+            | ((Src.As.Immediate & 07) << 9)
+            | ((TOKEN_SUBQ == Type) << 8)
+            | (CountBits(Size - 1) << 6)
+            | (Ea.ModeReg), 
+            2
+        );
+        EmitEaExtension(Ea);
+    } break;
     case TOKEN_BTST:
     case TOKEN_BCHG:
     case TOKEN_BCLR:
     case TOKEN_BSET:
     {
         IgnoreSize(&Instruction);
-        Argument Src = ConsumeInstructionArgument(0);
+        Argument Src = ConsumeEa(0);
         CONSUME_COMMA();
         if (Src.Type == ARG_IMMEDIATE)
         {
-            Argument Dst = ConsumeInstructionArgument(4);
+            Argument Dst = ConsumeEa(4);
             EaEncoding DstEa = EncodeEa(Dst);
             Emit(0x0800
                 | LOOKUP_OPC(Type)
@@ -2180,7 +2241,7 @@ static void ConsumeStatement(void)
         }
         else if (Src.Type == ARG_DATA_REG)
         {
-            Argument Dst = ConsumeInstructionArgument(2);
+            Argument Dst = ConsumeEa(2);
             EaEncoding DstEa = EncodeEa(Dst);
             Emit(0x0100
                 | ((uint32_t)Src.As.Dn << 9)
@@ -2199,9 +2260,9 @@ static void ConsumeStatement(void)
     case TOKEN_MOVEA:
     {
         unsigned Size = ConsumeSize();
-        Argument Src = ConsumeInstructionArgument(2);
+        Argument Src = ConsumeEa(2);
         CONSUME_COMMA();
-        Argument Dst = ConsumeInstructionArgument(2);
+        Argument Dst = ConsumeEa(2);
 
         if (ARG_ADDR_REG == Dst.Type && 1 == Size)
         {
@@ -2213,14 +2274,6 @@ static void ConsumeStatement(void)
             ErrorInvalidAddrMode(&Instruction, Dst.Type, "destination");
         }
 
-        /* encode size, unique for move */
-        uint32_t SizeEncoding = 2; /* long */
-        if (2 == Size)
-            SizeEncoding = 3; /* word */
-        else if (1 == Size)
-            SizeEncoding = 1; /* byte */
-        SizeEncoding <<= 12;
-        
         /* encode ea */
         /* TODO: 
          *  Src PC AddrMode might be broken bc it depends on the length of Dst
@@ -2240,6 +2293,13 @@ static void ConsumeStatement(void)
         }
         else /* move/movea */
         {
+            /* encode size, unique for move */
+            uint32_t SizeEncoding = 2 << 12; /* long */
+            if (2 == Size)
+                SizeEncoding = 3 << 12; /* word */
+            else if (1 == Size)
+                SizeEncoding = 1 << 12; /* byte */
+
             Emit(SizeEncoding
                 | ((uint32_t)DstEa.RegMode << 6)
                 | SrcEa.ModeReg, 
@@ -2254,7 +2314,7 @@ static void ConsumeStatement(void)
         IgnoreSize(&Instruction);
         Argument Src = ConsumeImmediate();
         CONSUME_COMMA();
-        Argument Dst = ConsumeInstructionArgument(2);
+        Argument Dst = ConsumeEa(2);
         if (Dst.Type != ARG_DATA_REG)
         {
             ErrorInvalidAddrMode(&Instruction, Dst.Type, "destination");
@@ -2264,6 +2324,129 @@ static void ConsumeStatement(void)
             | (0xFF & Src.As.Immediate),
             2
         );
+    } break;
+    case TOKEN_MOVEP:
+    {
+        unsigned Size = ConsumeSize();
+        if (1 == Size)
+            Error("Invalid size specifier for movep.");
+
+        Argument Src = ConsumeEa(4);
+        CONSUME_COMMA();
+        Argument Dst = ConsumeEa(4);
+
+        unsigned OpMode = 04;
+        unsigned DataReg = 0, AddrReg = 0;
+        uint16_t Displacement = 0;
+        ArgumentType ExpectedSrcType = 0;
+        if (Dst.Type == ARG_DATA_REG)
+        {
+            ExpectedSrcType = ARG_IND_I16;
+            DataReg = Dst.As.Dn;
+            AddrReg = Src.As.Ind.An;
+            Displacement = Src.As.Ind.Displacement;
+        }
+        else if (Dst.Type == ARG_IND_I16)
+        {
+            OpMode += 2;
+            ExpectedSrcType = ARG_DATA_REG;
+            DataReg = Src.As.Dn;
+            AddrReg = Dst.As.Ind.An;
+            Displacement = Dst.As.Ind.Displacement;
+        }
+        else
+        {
+            ErrorInvalidAddrMode(&Instruction, Dst.Type, "destination");
+        }
+        if (ExpectedSrcType && ExpectedSrcType != Src.Type)
+            ErrorInvalidAddrMode(&Instruction, Src.Type, "source");
+
+        OpMode += Size == 4;
+        Emit(0x0008
+            | (DataReg << 9)
+            | (OpMode << 6)
+            | (AddrReg),
+            2
+        );
+        Emit(Displacement, 2);
+    } break;
+    case TOKEN_MOVEM:
+    {
+        unsigned Size = ConsumeSize();
+        uint16_t Opcode, List;
+        EaEncoding Ea;
+        if (NextTokenIs(TOKEN_LCURLY)) /* mem to reg, postinc */
+        {
+            List = ConsumeRegisterList(false);
+            CONSUME_COMMA();
+            Argument Dst = ConsumeEa(4);
+            Ea = EncodeEa(Dst);
+            Opcode = 0x4C80;
+
+            if (ARG_DATA_REG == Dst.Type || ARG_ADDR_REG == Dst.Type 
+            || ARG_IND_PREDEC == Dst.Type || ARG_IMMEDIATE == Dst.Type
+            || ADDRM_USE_PC(Dst.Type))
+            {
+                ErrorInvalidAddrMode(&Instruction, Dst.Type, "destination");
+            }
+        }
+        else /* reg to mem predec */
+        {
+            Argument Src = ConsumeEa(4);
+            Ea = EncodeEa(Src);
+            CONSUME_COMMA();
+            List = ConsumeRegisterList(Src.Type == ARG_IND_PREDEC);
+            Opcode = 0x4880;
+
+            if (ARG_DATA_REG == Src.Type || ARG_ADDR_REG == Src.Type 
+            || ARG_IND_POSTINC == Src.Type || ARG_IMMEDIATE == Src.Type)
+            {
+                ErrorInvalidAddrMode(&Instruction, Src.Type, "source");
+            }
+        }
+
+        Emit(Opcode
+            | ((Size == 4) << 6)
+            | Ea.ModeReg, 
+            2
+        );
+        Emit(List, sizeof List);
+    } break;
+    case TOKEN_ADD:
+    case TOKEN_SUB:
+    {
+        unsigned Size = ConsumeSize();
+        Argument Src = ConsumeEa(2);
+        CONSUME_COMMA();
+        Argument Dst = ConsumeEa(2);
+        EaEncoding Dea = EncodeEa(Dst);
+
+        UNREACHABLE("TODO: add and sub");
+    } break;
+    case TOKEN_Bcc:
+    case TOKEN_DBcc:
+    case TOKEN_BRA:
+    case TOKEN_BSR:
+    {
+        if (TOKEN_DBcc == Type)
+        {
+            IgnoreSize(&Instruction);
+            Argument Reg = ConsumeEa(2);
+            if (Reg.Type != ARG_DATA_REG)
+            {
+                ErrorInvalidAddrMode(&Instruction, Reg.Type, "destination");
+            }
+            uint32_t Offset = IntExpr("Branch target") - (Assembler.PC + 2);
+            Emit(0x5068
+                | ((uint32_t)Instruction.Data.ConditionalCode << 8)
+                | Reg.As.Dn, 2
+            );
+            Emit(Offset, 2);
+        }
+        else
+        {
+            UNREACHABLE("TODO: branch ins");
+        }
     } break;
     }
 
