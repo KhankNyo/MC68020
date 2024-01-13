@@ -1831,41 +1831,12 @@ static EaEncoding EncodeEa(Argument Arg, unsigned Size)
     case ARG_IND_REG:       Encoding.ModeReg = 020 + Arg.As.Ind.An; break;
     case ARG_IND_POSTINC:   Encoding.ModeReg = 030 + Arg.As.PostInc.An; break;
     case ARG_IND_PREDEC:    Encoding.ModeReg = 040 + Arg.As.PreDec.An; break;
+
     case ARG_IND_I16:       
     {
         Encoding.ModeReg = 050 + Arg.As.Ind.An; 
         Encoding.HasImmediate = true;
         Encoding.u.Immediate = Arg.As.Ind.Displacement;
-    } break;
-    case ARG_MEM_POST:
-    {
-        Encoding.Extension = ENCODE_FULL_EXTENSION(
-            Arg.As.Mem.X.n,
-            Arg.As.Mem.X.Size == 4,
-            Arg.As.Mem.X.Scale,
-            Arg.As.Mem.Bd == 0,
-            Arg.As.Mem.X.n == NO_REG,
-            EncodeExtensionSize(Arg.As.Mem.Bd),
-            04 + EncodeExtensionSize(Arg.As.Mem.Od)
-        );
-        Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
-        Encoding.OuterDisplacement = Arg.As.Mem.Od;
-        Encoding.ModeReg = 060 + Arg.As.Mem.An;
-    } break;
-    case ARG_MEM_PRE:
-    {
-        Encoding.Extension = ENCODE_FULL_EXTENSION(
-            Arg.As.Mem.X.n,
-            Arg.As.Mem.X.Size == 4,
-            Arg.As.Mem.X.Scale,
-            Arg.As.Mem.Bd == 0,
-            Arg.As.Mem.X.n == NO_REG,
-            EncodeExtensionSize(Arg.As.Mem.Bd),
-            EncodeExtensionSize(Arg.As.Mem.Od)
-        );
-        Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
-        Encoding.OuterDisplacement = Arg.As.Mem.Od;
-        Encoding.ModeReg = 060 + Arg.As.Mem.An;
     } break;
     case ARG_MEM:
     {
@@ -1877,6 +1848,23 @@ static EaEncoding EncodeEa(Argument Arg, unsigned Size)
             1,
             EncodeExtensionSize(Arg.As.Mem.Bd),
             EncodeExtensionSize(Arg.As.Mem.Od)
+        );
+        Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
+        Encoding.OuterDisplacement = Arg.As.Mem.Od;
+        Encoding.ModeReg = 060 + Arg.As.Mem.An;
+    } break;
+    case ARG_MEM_PRE:
+    case ARG_MEM_POST:
+    {
+        unsigned IsPost = (ARG_MEM_POST == Arg.Type)? 04 : 0;
+        Encoding.Extension = ENCODE_FULL_EXTENSION(
+            Arg.As.Mem.X.n,
+            Arg.As.Mem.X.Size == 4,
+            Arg.As.Mem.X.Scale,
+            Arg.As.Mem.Bd == 0,
+            Arg.As.Mem.X.n == NO_REG,
+            EncodeExtensionSize(Arg.As.Mem.Bd),
+            IsPost + EncodeExtensionSize(Arg.As.Mem.Od)
         );
         Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
         Encoding.OuterDisplacement = Arg.As.Mem.Od;
@@ -1907,6 +1895,7 @@ static EaEncoding EncodeEa(Argument Arg, unsigned Size)
         );
         Encoding.ModeReg = 060 + Arg.As.IdxI8.An;
     } break;
+
     case ARG_ADDR:          
     {
         Encoding.ModeReg = 070 + !IN_I16(Arg.As.Addr);
@@ -1918,6 +1907,67 @@ static EaEncoding EncodeEa(Argument Arg, unsigned Size)
         Encoding.ModeReg = 074;
         Encoding.HasImmediate = true;
         Encoding.u.Immediate = Arg.As.Immediate;
+    } break;
+    case ARG_PC_I16:
+    {
+        Encoding.ModeReg = 072;
+        Encoding.HasImmediate = true;
+        Encoding.u.Immediate = Arg.As.PC.I16;
+    } break;
+    case ARG_PC_IDX_I8:
+    {
+        Encoding.Extension = ENCODE_BRIEF_EXTENSION(
+            Arg.As.PC.Idx.X.n,
+            Arg.As.PC.Idx.X.Scale,
+            Arg.As.PC.Idx.X.Size == 4,
+            Arg.As.PC.Idx.I8
+        );
+        Encoding.ModeReg = 073;
+    } break;
+    case ARG_PC_BD:
+    {
+        Encoding.Extension = ENCODE_FULL_EXTENSION(
+            Arg.As.PC.Mem.X.n,
+            Arg.As.PC.Mem.X.Scale,
+            Arg.As.PC.Mem.X.Size == 4,
+            Arg.As.PC.Mem.Bd == 0,
+            Arg.As.PC.Mem.X.n == NO_REG,
+            EncodeExtensionSize(Arg.As.PC.Mem.Bd),
+            0
+        );
+        Encoding.ModeReg = 073;
+        Encoding.u.BaseDisplacement = Arg.As.PC.Mem.Bd;
+        Encoding.OuterDisplacement = Arg.As.PC.Mem.Od;
+    } break;
+    case ARG_PC_MEM:
+    {
+        Encoding.Extension = ENCODE_FULL_EXTENSION(
+            0, 0, 0,
+            Arg.As.PC.Mem.Bd == 0,
+            1,
+            EncodeExtensionSize(Arg.As.PC.Mem.Bd),
+            0
+        );
+        Encoding.ModeReg = 073;
+        Encoding.u.BaseDisplacement = Arg.As.PC.Mem.Bd;
+        Encoding.OuterDisplacement = Arg.As.PC.Mem.Od;
+    } break;
+    case ARG_PC_MEM_PRE:
+    case ARG_PC_MEM_POST:
+    {
+        unsigned IsPost = (ARG_PC_MEM_POST == Arg.Type)? 04 : 0;
+        Encoding.Extension = ENCODE_FULL_EXTENSION(
+            Arg.As.PC.Mem.X.n,
+            Arg.As.PC.Mem.X.Scale,
+            Arg.As.PC.Mem.X.Size == 4,
+            Arg.As.PC.Mem.Bd == 0,
+            Arg.As.PC.Mem.X.n == NO_REG,
+            EncodeExtensionSize(Arg.As.PC.Mem.Bd),
+            IsPost + EncodeExtensionSize(Arg.As.PC.Mem.Od)
+        );
+        Encoding.ModeReg = 073;
+        Encoding.u.BaseDisplacement = Arg.As.PC.Mem.Bd;
+        Encoding.OuterDisplacement = Arg.As.PC.Mem.Od;
     } break;
 
     case ARG_INVALID: DIE(); break;
@@ -2062,6 +2112,7 @@ static void ConsumeStatement(void)
         }
     } break;
     }
+
     if (Assembler.Panic)
     {
         Unpanic();
