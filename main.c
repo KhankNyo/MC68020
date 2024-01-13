@@ -49,7 +49,7 @@ int main(int argc, char **argv)
     }
     const char *FileName = argv[1];
     char *Source = ReadFile(FileName);
-    MC68020MachineCode Memory = MC68020Assemble(FileName, Source, false, stderr);
+    MC68020MachineCode Memory = MC68020Assemble(realloc, FileName, Source, false, stderr);
     free(Source);
     if (NULL == Memory.Buffer)
     {

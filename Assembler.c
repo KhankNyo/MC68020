@@ -37,10 +37,9 @@ typedef enum TokenType
     /* reg */
     TOKEN_ADDR_REG,
     TOKEN_DATA_REG,
-    TOKEN_PC,
-    TOKEN_SP, 
     TOKEN_CCR,
     TOKEN_SR,
+    TOKEN_REL, /* PC */
 
     /* instructions */
     TOKEN_ABCD,
@@ -49,6 +48,8 @@ typedef enum TokenType
     TOKEN_ADDI,
     TOKEN_ADDQ,
     TOKEN_ADDX,
+    TOKEN_ANDI,
+    TOKEN_AND,
     TOKEN_ASR, 
     TOKEN_ASL,
 
@@ -188,6 +189,15 @@ typedef struct Value
 
 typedef enum ArgumentType 
 {
+    /* '?' means optional. 
+     * When an item is optional, 
+     * the comma in front of or after it is also optional,
+     * ex:
+     *  [Bd?, An]:
+     *      valid: [An]; [Bd, An]
+     *  ([Bd?], An, Xn?)
+     *      valid: ([], An); ([Bd], An); ([Bd], An, Xn); ([], An, Xn)
+     * */
     ARG_INVALID = 0,
     ARG_IMMEDIATE,  /* #Imm */
     ARG_ADDR,       /* Abs Addr */
@@ -197,10 +207,19 @@ typedef enum ArgumentType
     ARG_IND_PREDEC, /* -(An) */
     ARG_IND_POSTINC,/* (An)+ */
     ARG_IND_I16,    /* (I16, An) */
-    ARG_IDX_I8,     /* (I8, An, Xn) */
-    ARG_IDX_BD,     /* (Bd, An, Xn) */
-    ARG_MEM_PRE,    /* ([Bd, An, Xn], Od) */
-    ARG_MEM_POST,   /* ([Bd, An], Xn, Od) */
+
+    ARG_IDX_I8,     /* (I8?, An, Xn) */
+    ARG_IDX_BD,     /* (Bd, An, Xn?) */
+    ARG_MEM_PRE,    /* ([Bd?, An, Xn], Od?) */
+    ARG_MEM_POST,   /* ([Bd?, An], Xn, Od?) */
+    ARG_MEM,        /* ([Bd?, An], Od?) */
+
+    ARG_PC_IDX_I8,  /* rel (I8?, Xn) */
+    ARG_PC_I16,     /* rel (I16) */
+    ARG_PC_BD,      /* rel (Bd, Xn?) */
+    ARG_PC_MEM_PRE, /* rel ([Bd, Xn], Od?) */
+    ARG_PC_MEM_POST,/* rel ([Bd], Xn, Od?) */
+    ARG_PC_MEM,     /* rel ([Bd], Od?) */
 } ArgumentType;
 typedef struct XnReg /* n >= 8 for Address reg */ 
 {
@@ -231,6 +250,17 @@ typedef struct Argument
             uint8_t An;
             XnReg X;
         } Mem, Idx;
+        union {
+            uint16_t I16;
+            struct {
+                XnReg X;
+                int8_t I8;
+            } Idx;
+            struct {
+                int32_t Bd, Od;
+                XnReg X;
+            } Mem;
+        } PC;
     } As;
 } Argument;
 #define ARGUMENT(Typ, ...) (Argument) {.Type = Typ, __VA_ARGS__}
@@ -267,8 +297,9 @@ typedef struct Expression
 
 static struct 
 {
+    AllocatorFn Allocator;
     void (*Emit)(uint8_t *, uint64_t, unsigned);
-    bool Error, Panic;
+    bool Error, CriticalError, Panic;
     const char *SourceName;
     FILE *ErrorStream;
 
@@ -597,6 +628,8 @@ static Token ConsumeIdentifier(char FirstLetter)
             INS(ADDI),
             INS(ADDQ),
             INS(ADDX),
+            INS(AND),
+            INS(ANDI),
             INS(ASR), 
             INS(ASL),
         },
@@ -630,6 +663,8 @@ static Token ConsumeIdentifier(char FirstLetter)
             INS(CMPA),
             INS(CMPI),
             INS(CMPM),
+            KEYWORD(CCR),
+            KEYWORD(SR),
         },
         ['D'] = {
             INS(DBcc),
@@ -683,7 +718,6 @@ static Token ConsumeIdentifier(char FirstLetter)
         ['P'] = {
             INS(PACK),
             INS(PEA),
-            KEYWORD(PC),
         },
         ['R'] = {
             INS(RESET),
@@ -696,9 +730,9 @@ static Token ConsumeIdentifier(char FirstLetter)
             INS(RTM),
             INS(RTR),
             INS(RTS),
+            KEYWORD(REL),
         },
         ['S'] = {
-            KEYWORD(SP),
             INS(SBCD),
             INS(Scc),
             INS(STOP),
@@ -752,7 +786,7 @@ static Token ConsumeIdentifier(char FirstLetter)
     char UpperSecond = Len > 1? TO_UPPER(Assembler.StartPtr[1]) : '\0';
     char UpperThird = Len > 2? TO_UPPER(Assembler.StartPtr[2]) : '\0';
     /* Bcc? */
-    if ('B' == UpperFirst && 3 == Len)
+    if ('B' == UpperFirst && IN_RANGE(2, Len, 3))
     {
         unsigned ConditionalCode = GetConditionalCodeFromMnemonic(UpperSecond, UpperThird);
         if (INVALID_CONDITIONAL_CODE != ConditionalCode)
@@ -763,7 +797,7 @@ static Token ConsumeIdentifier(char FirstLetter)
         }
     }
     /* DBcc? */
-    if ('D' == UpperFirst && 4 == Len && 'B' == UpperSecond)
+    if ('D' == UpperFirst && IN_RANGE(3, Len, 4) && 'B' == UpperSecond)
     {
         char UpperFourth = TO_UPPER(Assembler.StartPtr[3]);
         unsigned ConditionalCode = GetConditionalCodeFromMnemonic(UpperThird, UpperFourth);
@@ -774,9 +808,15 @@ static Token ConsumeIdentifier(char FirstLetter)
             );
         }
     }
-    /* Scc? */
-    if ('S' == UpperFirst && 3 == Len)
+    /* SP, Scc? */
+    if ('S' == UpperFirst && IN_RANGE(2, Len, 3))
     {
+        if ('P' == UpperSecond)
+        {
+            return MakeTokenWith(TOKEN_ADDR_REG, 
+                .Int = 7 /* SP, A7 */
+            );
+        }
         unsigned ConditionalCode = GetConditionalCodeFromMnemonic(UpperSecond, UpperThird);
         if (INVALID_CONDITIONAL_CODE != ConditionalCode)
         {
@@ -786,7 +826,7 @@ static Token ConsumeIdentifier(char FirstLetter)
         }
     }
     /* TRAPcc? */
-    if ('T' == UpperFirst && 6 == Len && StrSliceEquNoCase(Assembler.StartPtr + 1, "RAP", 3))
+    if ('T' == UpperFirst && IN_RANGE(5, Len, 6) && StrSliceEquNoCase(Assembler.StartPtr + 1, "RAP", 3))
     {
         unsigned ConditionalCode = GetConditionalCodeFromMnemonic(
                 TO_UPPER(Assembler.StartPtr[4]), TO_UPPER(Assembler.StartPtr[5])
@@ -908,6 +948,9 @@ static TokenType ConsumeToken(void)
     return Assembler.CurrentToken.Type;
 }
 
+#define NextTokenIs(Typ) (Assembler.NextToken.Type == (Typ))
+#define NextTokenIsIndexRegister() (NextTokenIs(TOKEN_ADDR_REG) || NextTokenIs(TOKEN_DATA_REG))
+
 static bool ConsumeIfNextTokenIs(TokenType Type)
 {
     if (Assembler.NextToken.Type == Type)
@@ -978,6 +1021,22 @@ static void Error(const char *Fmt, ...)
     va_list Args;
     va_start(Args, Fmt);
     ErrorAtTokenArgs(&Assembler.CurrentToken, Fmt, Args);
+    va_end(Args);
+}
+
+static void EmptyError(const char *Fmt, ...)
+{
+    va_list Args;
+    va_start(Args, Fmt);
+    
+    Assembler.Error = true;
+    Assembler.Panic = true;
+    if (NULL != Assembler.ErrorStream)
+    {
+        vfprintf(Assembler.ErrorStream, Fmt, Args);
+        fputc('\n', Assembler.ErrorStream);
+    }
+
     va_end(Args);
 }
 
@@ -1072,7 +1131,17 @@ static Value Factor(void)
         return Val;
     } break;
     case TOKEN_PLUS:
+    {
         return Factor();
+    } break;
+    case TOKEN_TILDE:
+    {
+        Value Val = Factor();
+        if (Val.IsFloat)
+            Error("'~' is not applicable to floating-point number.");
+        Val.As.Int = ~Val.As.Int;
+        return Val;
+    } break;
     case TOKEN_LPAREN:
     {
         Value Val = ConstExpr();
@@ -1257,6 +1326,16 @@ static Value ConstExpr(void)
     return Val;
 }
 
+static uint32_t IntExpr(const char *ExprName)
+{
+    Value Expr = ConstExpr();
+    if (Expr.IsFloat)
+    {
+        ErrorAtExpr("%s cannot be a floating-point number.", ExprName);
+    }
+    return Expr.As.Int;
+}
+
 
 static void PushSymbol(const Token *Sym, Value Val)
 {
@@ -1316,12 +1395,13 @@ static unsigned ConsumeSizeSpecifier(void)
     case 'W': Size = 2; break;
     case 'B': Size = 1; break;
     UnknownSize:
-    default: Error("Expected operand size to be 'w', 'l' or 'b'.");
+    default: Error("Expected operand size specifier to be 'b', 'w' or 'l'.");
     }
     return Size;
 }
 
-static XnReg ConsumeXn(void)
+/* Next token is TOKEN_ADDR_REG or TOKEN_DATA_REG */
+static XnReg ConsumeIndexRegister(void)
 {
     XnReg X = { 0 };
     if (ConsumeIfNextTokenIs(TOKEN_ADDR_REG))
@@ -1344,35 +1424,92 @@ static XnReg ConsumeXn(void)
 
     if (ConsumeIfNextTokenIs(TOKEN_STAR))
     {
-        Value Scale = ConstExpr();
-        if (Scale.IsFloat)
-            ErrorAtExpr("Cannot use floating-point number as scale factor.");
+        unsigned Scale = IntExpr("Index scalar");
 
-        if (Scale.As.Int != 1 && Scale.As.Int != 2 
-        && Scale.As.Int != 4 && Scale.As.Int != 8)
+        if (Scale != 1 && Scale != 2 
+        && Scale != 4 && Scale != 8)
         {
             ErrorAtExpr("Scale factor must be 1, 2, 4, or 8.");
         }
-        X.Scale = CountBits(Scale.As.Int - 1);
+        X.Scale = CountBits(Scale - 1);
     }
     return X;
 }
+
+
+/* '[' is the current token */
+static Argument ConsumeMemoryIndirect(void)
+{
+    uint32_t BaseDisplacement = 0;
+    if (!ConsumeIfNextTokenIs(TOKEN_ADDR_REG)) /* [Expr, An ...] */
+    {
+        BaseDisplacement = IntExpr("Base Displacement");
+        ConsumeOrError(TOKEN_COMMA, "Expected ',' after expression.");
+        ConsumeOrError(TOKEN_ADDR_REG, "Expected address register.");
+    }
+
+    unsigned An = Assembler.CurrentToken.Data.Int;
+    XnReg Xn = { .n = NO_REG };
+    ArgumentType Type = ARG_MEM;
+
+    if (ConsumeIfNextTokenIs(TOKEN_COMMA)) /* [Expr, An, Xn] */
+    {
+        Xn = ConsumeIndexRegister();
+        Type = ARG_MEM_PRE;
+    }
+
+    return ARGUMENT(
+        Type,
+        .As.Mem = {
+            .An = An,
+            .X = Xn,
+            .Bd = BaseDisplacement,
+        }
+    );
+}
+
+
 
 /* '(' is the current token */
 static Argument IndirectAddressingMode(void)
 {
     if (ConsumeIfNextTokenIs(TOKEN_LBRACE)) /* ([...] ...) */
     {
-        UNREACHABLE("TODO: Mem addrm");
-        return (Argument) { 0 };
+        /* ([...], ...) */
+        Argument Arg = ConsumeMemoryIndirect();
+        ConsumeOrError(TOKEN_RBRACE, "Expected ']' after memory indirection.");
+
+        if (ConsumeIfNextTokenIs(TOKEN_COMMA)) /* ([], ...) */
+        {
+            if (NextTokenIsIndexRegister()) /* ([], Xn ...) */
+            {
+                if (Arg.Type == ARG_MEM_PRE)
+                {
+                    ErrorAtToken(&Assembler.NextToken, 
+                        "Too many index field for Memory Indirect addressing mode."
+                    );
+                }
+
+                Arg.Type = ARG_MEM_POST;
+                Arg.As.Mem.X = ConsumeIndexRegister();
+                if (!ConsumeIfNextTokenIs(TOKEN_COMMA))
+                    goto NoOuterDisplacement;
+            }
+
+            /* ([], Xn, Expr) */
+            Arg.As.Mem.Od = IntExpr("Outer Displacement");
+        }
+NoOuterDisplacement:
+        ConsumeOrError(TOKEN_RPAREN, "Expected ')'.");
+        return Arg;
     }
     else if (ConsumeIfNextTokenIs(TOKEN_ADDR_REG)) /* (An ...)... */
     {
         unsigned An = Assembler.CurrentToken.Data.Int;
         if (ConsumeIfNextTokenIs(TOKEN_COMMA)) /* (An, Xn) */
         {
-            XnReg Xn = ConsumeXn();
-            ConsumeOrError(TOKEN_RPAREN, "Expected ')' after index.");
+            XnReg Xn = ConsumeIndexRegister();
+            ConsumeOrError(TOKEN_RPAREN, "Expected ')' after index field.");
             return ARGUMENT(
                 ARG_IDX_I8,
                 .As.IdxI8 = {
@@ -1382,7 +1519,7 @@ static Argument IndirectAddressingMode(void)
                 }
             );
         }
-        ConsumeOrError(TOKEN_RPAREN, "Expected ')' or ','."); /* (An)... */
+        ConsumeOrError(TOKEN_RPAREN, "Expected ')' or ',' after address register."); /* (An)... */
         if (ConsumeIfNextTokenIs(TOKEN_PLUS)) /* (An)+ */
         {
             return ARGUMENT(
@@ -1399,15 +1536,13 @@ static Argument IndirectAddressingMode(void)
     }
     else /* (Expr ...) */
     {
-        Value Displacement = ConstExpr();
-        if (Displacement.IsFloat)
-            ErrorAtExpr("Displacement cannot be a floating-point number.");
+        uint32_t Displacement = IntExpr("Displacement");
 
         if (ConsumeIfNextTokenIs(TOKEN_RPAREN)) /* (Expr) */
         {
             return ARGUMENT(
                 ARG_ADDR,
-                .As.Addr = Displacement.As.Int
+                .As.Addr = Displacement
             );
         } 
 
@@ -1417,23 +1552,24 @@ static Argument IndirectAddressingMode(void)
         unsigned An = Assembler.CurrentToken.Data.Int;
         if (ConsumeIfNextTokenIs(TOKEN_COMMA)) /* (Expr, An, Xn) */
         {
-            XnReg Xn = ConsumeXn();
+            XnReg Xn = ConsumeIndexRegister();
             ConsumeOrError(TOKEN_RPAREN, "Expected ')' after index.");
-            if (IN_I8((int64_t)Displacement.As.Int))
+            if (IN_I8(Displacement)) /* (I8, An, Xn) */
             {
                 return ARGUMENT(
                     ARG_IDX_I8,
                     .As.IdxI8 = {
                         .An = An,
                         .X = Xn,
-                        .I8 = Displacement.As.Int
+                        .I8 = Displacement
                     }
                 );
             }
+            /* (Bd, An, Xn) */
             return ARGUMENT(
                 ARG_IDX_BD,
                 .As.Idx = {
-                    .Bd = Displacement.As.Int,
+                    .Bd = Displacement,
                     .An = An,
                     .X = Xn
                 }
@@ -1441,27 +1577,155 @@ static Argument IndirectAddressingMode(void)
         }
         /* (Expr, An) */
         ConsumeOrError(TOKEN_RPAREN, "Expected ')' or ','.");
-        if (IN_I16(Displacement.As.Int))
+        if (IN_I16(Displacement)) /* (I16, An) */
         {
             return ARGUMENT(
                 ARG_IND_I16,
                 .As.Ind = {
                     .An = An,
                     .X.n = NO_REG,
-                    .Displacement = Displacement.As.Int,
+                    .Displacement = Displacement
                 },
             );
         }
+        /* (Bd, An) */
         return ARGUMENT(
             ARG_IDX_BD,
             .As.Idx = {
                 .An = An,
                 .X.n = NO_REG,
-                .Bd = Displacement.As.Int
+                .Bd = Displacement
             }
         );
     }
 }
+
+static Argument PCRelativeAddressingMode(void)
+{
+    Argument Arg = { 0 };
+    ConsumeOrError(TOKEN_LPAREN, "Expected '(' after rel.");
+
+    if (ConsumeIfNextTokenIs(TOKEN_LBRACE)) /* rel ([...] ...) */
+    {
+        Arg.Type = ARG_PC_MEM;
+        Arg.As.PC.Mem.Bd = IntExpr("Base Displacement");
+        if (ConsumeIfNextTokenIs(TOKEN_COMMA))
+        {
+            Arg.Type = ARG_PC_MEM_PRE;
+            Arg.As.PC.Mem.X = ConsumeIndexRegister();
+        }
+        ConsumeOrError(TOKEN_RBRACE, "Expected ']'.");
+
+        if (ConsumeIfNextTokenIs(TOKEN_COMMA))
+        {
+            if (NextTokenIsIndexRegister())
+            {
+                if (Arg.Type == ARG_PC_MEM_PRE)
+                {
+                    Error("Too many index registers for PC-relative Memory Indirect addressing mode.");
+                }
+                Arg.Type = ARG_PC_MEM_POST;
+                Arg.As.PC.Mem.X = ConsumeIndexRegister();
+                if (!ConsumeIfNextTokenIs(TOKEN_COMMA))
+                    goto NoOuterDisplacement;
+            }
+
+            Arg.As.PC.Mem.Od = IntExpr("Outer Displacement");
+        }
+NoOuterDisplacement:
+        /* C is stupid */;
+    }
+    else if (NextTokenIsIndexRegister()) /* rel (Xn) */
+    {
+        Arg = ARGUMENT(
+            ARG_PC_IDX_I8,
+            .As.PC.Idx = {
+                .I8 = 0,
+                .X = ConsumeIndexRegister()
+            }
+        );
+    }
+    else
+    {
+        uint32_t BaseDisplacement = IntExpr("Base Displacement");
+        if (ConsumeIfNextTokenIs(TOKEN_COMMA)) /* (Bd, Xn) */
+        {
+            XnReg Xn = ConsumeIndexRegister();
+            if (IN_I8(BaseDisplacement)) /* (I8, Xn) */
+            {
+                Arg = ARGUMENT(
+                    ARG_PC_IDX_I8, 
+                    .As.PC.Idx = {
+                        .X = Xn,
+                        .I8 = BaseDisplacement
+                    }
+                );
+            }
+            else /* (Bd, Xn) */
+            {
+                Arg = ARGUMENT(
+                    ARG_PC_BD, 
+                    .As.PC.Mem = {
+                        .Bd = BaseDisplacement,
+                        .X = Xn,
+                    }
+                );
+            }
+        }
+        else if (IN_I16(BaseDisplacement)) /* (I16) */
+        {
+            Arg = ARGUMENT(
+                ARG_PC_I16,
+                .As.PC.I16 = BaseDisplacement
+            );
+        }
+        else /* (Bd) */
+        {
+            Arg = ARGUMENT(
+                ARG_PC_BD,
+                .As.PC.Mem = {
+                    .Bd = BaseDisplacement,
+                    .X.n = NO_REG,
+                }
+            );
+        }
+    }
+
+    ConsumeOrError(TOKEN_RPAREN, "Expected ')' after addressing mode.");
+    return Arg;
+}
+
+
+
+static const char *LookupAddrModeName(ArgumentType AddressingMode)
+{
+    static const char *Lut[] = {
+        [ARG_INVALID]       = "Invalid",
+        [ARG_IMMEDIATE]     = "Immediate",  /* #Imm */
+        [ARG_ADDR]          = "Absolute",       /* Abs Addr */
+        [ARG_DATA_REG]      = "Data Register",   /* Dn */
+        [ARG_ADDR_REG]      = "Address Register",   /* An */
+        [ARG_IND_REG]       = "Register Indirect",    /* (An) */
+        [ARG_IND_PREDEC]    = "Predecrement Indirect", /* -(An) */
+        [ARG_IND_POSTINC]   = "Postincrement Indirect",/* (An)+ */
+
+        [ARG_IND_I16]       = "Indirect",    /* (I16, An) */
+        [ARG_IDX_I8]        = "Indexed Indirect",     /* (I8, An, Xn) */
+        [ARG_IDX_BD]        = "Indexed Indirect",     /* (Bd, An, Xn) */
+        [ARG_MEM_PRE]       = "Preindexed Memory Indirect",    /* ([Bd, An, Xn], Od) */
+        [ARG_MEM_POST]      = "Postindexed Memory Indirect",   /* ([Bd, An], Xn, Od) */
+        [ARG_MEM]           = "Memory Indirect",
+
+        [ARG_PC_I16]        = "PC-Relative",
+        [ARG_PC_IDX_I8]     = "Indexed PC-Relative",
+        [ARG_PC_BD]         = "Indexed PC-Relative",
+        [ARG_PC_MEM_POST]   = "Postindexed PC-Relative Indirect",
+        [ARG_PC_MEM_PRE]    = "Preindexed PC-Relative Indirect",
+        [ARG_PC_MEM]        = "PC-Relative Indirect",
+    };
+    return Lut[AddressingMode];
+}
+
 
 static Argument ConsumeInstructionArgument(unsigned Size)
 {
@@ -1469,26 +1733,16 @@ static Argument ConsumeInstructionArgument(unsigned Size)
     {
     default:                /* Addr */
     {
-        Value Address = ConstExpr();
-        if (Address.IsFloat)
-        {
-            Error("Address cannot be a floating-point number.");
-        }
         return ARGUMENT(
             ARG_ADDR,
-            .As.Addr = Address.As.Int
+            .As.Addr = IntExpr("Address")
         );
     } break;
     case TOKEN_POUND:       /* #Imm */
     {
-        Value Immediate = ConstExpr();
-        if (Immediate.IsFloat)
-        {
-            Error("Invalid floating-point immediate.");
-        }
         return ARGUMENT(
             ARG_IMMEDIATE,
-            .As.Immediate = Immediate.As.Int
+            .As.Immediate = IntExpr("Immediate") 
         );
     } break;
     case TOKEN_ADDR_REG:    /* An */
@@ -1516,12 +1770,16 @@ static Argument ConsumeInstructionArgument(unsigned Size)
     case TOKEN_MINUS:
     {
         ConsumeOrError(TOKEN_LPAREN, "Expected '(' after '-'.");
-        ConsumeOrError(TOKEN_ADDR_REG, "Expected address register for pre-decrement addressing mode.");
+        ConsumeOrError(TOKEN_ADDR_REG, "Expected address register.");
         return ARGUMENT(
             ARG_IND_PREDEC,
             .As.PreDec.An = Assembler.CurrentToken.Data.Int
         );
         ConsumeOrError(TOKEN_RPAREN, "Expected ')' after register.");
+    } break;
+    case TOKEN_REL:         /* rel (...) */
+    {
+        return PCRelativeAddressingMode();
     } break;
     }
 }
@@ -1529,13 +1787,9 @@ static Argument ConsumeInstructionArgument(unsigned Size)
 static Argument ConsumeImmediate(void)
 {
     ConsumeOrError(TOKEN_POUND, "Expected '#'.");
-    Value Immediate = ConstExpr();
-    if (Immediate.IsFloat)
-        ErrorAtExpr("Immediate must be an integer.");
-
     return ARGUMENT(
         ARG_IMMEDIATE,
-        .As.Immediate = Immediate.As.Int,
+        .As.Immediate = IntExpr("Immediate")
     );
 }
 
@@ -1577,7 +1831,12 @@ static EaEncoding EncodeEa(Argument Arg, unsigned Size)
     case ARG_IND_REG:       Encoding.ModeReg = 020 + Arg.As.Ind.An; break;
     case ARG_IND_POSTINC:   Encoding.ModeReg = 030 + Arg.As.PostInc.An; break;
     case ARG_IND_PREDEC:    Encoding.ModeReg = 040 + Arg.As.PreDec.An; break;
-    case ARG_IND_I16:       Encoding.ModeReg = 050 + Arg.As.Ind.An; break;
+    case ARG_IND_I16:       
+    {
+        Encoding.ModeReg = 050 + Arg.As.Ind.An; 
+        Encoding.HasImmediate = true;
+        Encoding.u.Immediate = Arg.As.Ind.Displacement;
+    } break;
     case ARG_MEM_POST:
     {
         Encoding.Extension = ENCODE_FULL_EXTENSION(
@@ -1591,7 +1850,7 @@ static EaEncoding EncodeEa(Argument Arg, unsigned Size)
         );
         Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
         Encoding.OuterDisplacement = Arg.As.Mem.Od;
-        Encoding.ModeReg = 060 + Arg.As.Ind.An;
+        Encoding.ModeReg = 060 + Arg.As.Mem.An;
     } break;
     case ARG_MEM_PRE:
     {
@@ -1602,26 +1861,41 @@ static EaEncoding EncodeEa(Argument Arg, unsigned Size)
             Arg.As.Mem.Bd == 0,
             Arg.As.Mem.X.n == NO_REG,
             EncodeExtensionSize(Arg.As.Mem.Bd),
+            EncodeExtensionSize(Arg.As.Mem.Od)
+        );
+        Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
+        Encoding.OuterDisplacement = Arg.As.Mem.Od;
+        Encoding.ModeReg = 060 + Arg.As.Mem.An;
+    } break;
+    case ARG_MEM:
+    {
+        Encoding.Extension = ENCODE_FULL_EXTENSION(
+            0, 
+            0, 
+            0,
+            Arg.As.Mem.Bd == 0,
+            1,
+            EncodeExtensionSize(Arg.As.Mem.Bd),
             04 + EncodeExtensionSize(Arg.As.Mem.Od)
         );
         Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
         Encoding.OuterDisplacement = Arg.As.Mem.Od;
-        Encoding.ModeReg = 060 + Arg.As.Ind.An;
+        Encoding.ModeReg = 060 + Arg.As.Mem.An;
     } break;
     case ARG_IDX_BD:
     {
         Encoding.Extension = ENCODE_FULL_EXTENSION(
-            Arg.As.Mem.X.n,
-            Arg.As.Mem.X.Size == 4,
-            Arg.As.Mem.X.Scale,
-            Arg.As.Mem.Bd == 0,
-            Arg.As.Mem.X.n == NO_REG,
-            EncodeExtensionSize(Arg.As.Mem.Bd),
+            Arg.As.Idx.X.n,
+            Arg.As.Idx.X.Size == 4,
+            Arg.As.Idx.X.Scale,
+            Arg.As.Idx.Bd == 0,
+            Arg.As.Idx.X.n == NO_REG,
+            EncodeExtensionSize(Arg.As.Idx.Bd),
             0
         );
-        Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
-        Encoding.OuterDisplacement = Arg.As.Mem.Od;
-        Encoding.ModeReg = 060 + Arg.As.Ind.An;
+        Encoding.u.BaseDisplacement = Arg.As.Idx.Bd;
+        Encoding.OuterDisplacement = Arg.As.Idx.Od;
+        Encoding.ModeReg = 060 + Arg.As.Idx.An;
     } break;
     case ARG_IDX_I8:        
     {
@@ -1635,7 +1909,7 @@ static EaEncoding EncodeEa(Argument Arg, unsigned Size)
     } break;
     case ARG_ADDR:          
     {
-        Encoding.ModeReg = 070 + (Size == 4);
+        Encoding.ModeReg = 070 + !IN_I16(Arg.As.Addr);
         Encoding.HasImmediate = true;
         Encoding.u.Immediate = Arg.As.Addr;
     } break;
@@ -1676,12 +1950,20 @@ static void BigEndianEmitter(uint8_t *Buffer, uint64_t Data, unsigned Size)
 
 static void Emit(uint64_t Data, unsigned Size)
 {
+    if (Assembler.CriticalError)
+        return;
+
     if (Assembler.MachineCode.Size + Size >= Assembler.MachineCode.Capacity)
     {
         Assembler.MachineCode.Capacity = (Assembler.MachineCode.Capacity + Size)*2;
-        Assembler.MachineCode.Buffer = realloc(Assembler.MachineCode.Buffer, Assembler.MachineCode.Capacity);
+        Assembler.MachineCode.Buffer = 
+            Assembler.Allocator(Assembler.MachineCode.Buffer, Assembler.MachineCode.Capacity);
         if (NULL == Assembler.MachineCode.Buffer)
-            UNREACHABLE("realloc failed");
+        {
+            Assembler.CriticalError = true;
+            EmptyError("Allocator failed.");
+            return;
+        }
     }
     Assembler.Emit(&Assembler.MachineCode.Buffer[Assembler.MachineCode.Size], Data, Size);
     Assembler.MachineCode.Size += Size;
@@ -1690,7 +1972,10 @@ static void Emit(uint64_t Data, unsigned Size)
 static void EmitEaExtension(EaEncoding Encoding)
 {
     if (Encoding.HasImmediate)
+    {
         Emit(Encoding.u.Immediate, IN_I16(Encoding.u.Immediate) ? 2 : 4);
+    }
+
     if (Encoding.Extension == NO_EXTENSION)
         return;
 
@@ -1716,7 +2001,7 @@ static void Unpanic(void)
 
 static unsigned ConsumeSize(void)
 {
-    unsigned Size = 2;
+    unsigned Size = 2; /* default size */
     if (ConsumeIfNextTokenIs(TOKEN_DOT))
         Size = ConsumeSizeSpecifier();
     return Size;
@@ -1724,37 +2009,55 @@ static unsigned ConsumeSize(void)
 
 static void ConsumeStatement(void)
 {
-    Token Current = Assembler.NextToken;
-    switch (ConsumeToken())
+    TokenType Type = ConsumeToken();
+    Token Current = Assembler.CurrentToken;
+    switch (Type)
     {
     case TOKEN_IDENTIFIER:
     {
         DeclStmt();
     } break;
     case TOKEN_ADDI:
+    case TOKEN_ANDI:
+    case TOKEN_CMPI:
+    case TOKEN_EORI:
+    case TOKEN_ORI:
+    case TOKEN_SUBI:
     {
+        static const unsigned OpcodeLut[TOKEN_SUBI - TOKEN_ADDI] = {
+            03 << 1, /* ADDI */
+            01 << 1, /* ANDI */
+            06 << 1, /* CMPI */
+            05 << 1, /* EORI */
+            00 << 1, /* ORI */
+            02 << 1, /* SUBI */
+            /* 04 is bit instructions */
+        };
         unsigned Size = ConsumeSize();
         Argument Src = ConsumeImmediate();
         ConsumeOrError(TOKEN_COMMA, "Expected ',' after immediate.");
         Argument Dst = ConsumeInstructionArgument(Size);
+
         switch (Dst.Type)
         {
         case ARG_IMMEDIATE:
         case ARG_ADDR_REG:
         {
-            ErrorAtToken(&Current, "Invalid addressing mode for addi.");
+            ErrorAtToken(&Current, "'%s' addressing mode is not valid for '"STRVIEW_FMT"'.", 
+                    LookupAddrModeName(Dst.Type),
+                    STRVIEW_FMT_ARG(Current.Lexeme)
+            );
         } break;
         default:
         {
-            EaEncoding Encoding = EncodeEa(Dst, Size);
-
-            Emit((0x6 << 8)
+            EaEncoding Ea = EncodeEa(Dst, Size);
+            Emit((OpcodeLut[Type - TOKEN_ADDI] << 8)
                 | (CountBits(Size - 1) << 6)
-                | Encoding.ModeReg,
+                | Ea.ModeReg,
                 2
             );
             Emit(Src.As.Immediate, Size);
-            EmitEaExtension(Encoding);
+            EmitEaExtension(Ea);
         } break;
         }
     } break;
@@ -1765,7 +2068,7 @@ static void ConsumeStatement(void)
     }
 }
 
-MC68020MachineCode MC68020Assemble(
+MC68020MachineCode MC68020Assemble(AllocatorFn Allocator,
         const char *SourceName, const char *Source, bool LittleEndian, FILE *ErrorStream)
 {
     Assembler.Emit = LittleEndian? LittleEndianEmitter : BigEndianEmitter;
@@ -1774,27 +2077,35 @@ MC68020MachineCode MC68020Assemble(
     Assembler.CurrPtr = Source;
     Assembler.ErrorStream = ErrorStream;
     Assembler.Error = false;
+    Assembler.CriticalError = false;
     Assembler.Panic = false;
     Assembler.SourceName = SourceName;
     Assembler.LineCount = 1;
     Assembler.IdenCount = 0;
     Assembler.ExprCount = 0;
+    Assembler.Allocator = Allocator;
     Assembler.MachineCode = (MC68020MachineCode) { 
         .Size = 0,
         .Capacity = 256,
-        .Buffer = malloc(256)
+        .Buffer = Allocator(NULL, 256)
     };
     if (NULL == Assembler.MachineCode.Buffer)
     {
-        Error("Malloc failed.");
+        EmptyError("Allocator failed.");
         return Assembler.MachineCode;
     }
 
     Assembler.NextToken = (Token) { 0 };
     ConsumeToken();
-    while (!NoMoreToken())
+    while (!NoMoreToken() && !Assembler.CriticalError)
     {
         ConsumeStatement();
+    }
+
+    if (Assembler.Error || Assembler.CriticalError)
+    {
+        Allocator(Assembler.MachineCode.Buffer, 0);
+        Assembler.MachineCode = (MC68020MachineCode) { 0 };
     }
     return Assembler.MachineCode;
 }
