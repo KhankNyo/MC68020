@@ -307,17 +307,18 @@ static struct
     const char *LineStart, *StartPtr, *CurrPtr;
     Token CurrentToken, NextToken;
 
+    uint32_t PC;
     MC68020MachineCode MachineCode;
 
-    size_t IdenCount;
-    StringView Idens[1048];
+    uint32_t IdenCount;
     uint32_t IsFloat[1048/32];
+    StringView Idens[1048];
     union {
         uint64_t Int;
         double Flt;
     } IdenData[1048];
 
-    size_t ExprCount;
+    uint32_t ExprCount;
     Expression Expr[1048];
 } Assembler;
 
@@ -1600,7 +1601,7 @@ NoOuterDisplacement:
     }
 }
 
-static Argument PCRelativeAddressingMode(void)
+static Argument PCRelativeAddressingMode(uint32_t PC)
 {
     Argument Arg = { 0 };
     ConsumeOrError(TOKEN_LPAREN, "Expected '(' after rel.");
@@ -1608,7 +1609,7 @@ static Argument PCRelativeAddressingMode(void)
     if (ConsumeIfNextTokenIs(TOKEN_LBRACE)) /* rel ([...] ...) */
     {
         Arg.Type = ARG_PC_MEM;
-        Arg.As.PC.Mem.Bd = IntExpr("Base Displacement");
+        Arg.As.PC.Mem.Bd = IntExpr("Base Displacement") - PC;
         if (ConsumeIfNextTokenIs(TOKEN_COMMA))
         {
             Arg.Type = ARG_PC_MEM_PRE;
@@ -1647,7 +1648,7 @@ NoOuterDisplacement:
     }
     else
     {
-        uint32_t BaseDisplacement = IntExpr("Base Displacement");
+        uint32_t BaseDisplacement = IntExpr("Base Displacement") - PC;
         if (ConsumeIfNextTokenIs(TOKEN_COMMA)) /* (Bd, Xn) */
         {
             XnReg Xn = ConsumeIndexRegister();
@@ -1727,7 +1728,7 @@ static const char *LookupAddrModeName(ArgumentType AddressingMode)
 }
 
 
-static Argument ConsumeInstructionArgument(unsigned Size)
+static Argument ConsumeInstructionArgument(unsigned InstructionSize, unsigned Size)
 {
     switch (ConsumeToken())
     {
@@ -1779,7 +1780,7 @@ static Argument ConsumeInstructionArgument(unsigned Size)
     } break;
     case TOKEN_REL:         /* rel (...) */
     {
-        return PCRelativeAddressingMode();
+        return PCRelativeAddressingMode(Assembler.PC + InstructionSize);
     } break;
     }
 }
@@ -2015,8 +2016,10 @@ static void Emit(uint64_t Data, unsigned Size)
             return;
         }
     }
+
     Assembler.Emit(&Assembler.MachineCode.Buffer[Assembler.MachineCode.Size], Data, Size);
     Assembler.MachineCode.Size += Size;
+    Assembler.PC += Size;
 }
 
 static void EmitEaExtension(EaEncoding Encoding)
@@ -2086,7 +2089,7 @@ static void ConsumeStatement(void)
         unsigned Size = ConsumeSize();
         Argument Src = ConsumeImmediate();
         ConsumeOrError(TOKEN_COMMA, "Expected ',' after immediate.");
-        Argument Dst = ConsumeInstructionArgument(Size);
+        Argument Dst = ConsumeInstructionArgument(4, Size);
 
         switch (Dst.Type)
         {
