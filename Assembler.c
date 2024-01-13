@@ -264,6 +264,7 @@ typedef struct Argument
     } As;
 } Argument;
 #define ARGUMENT(Typ, ...) (Argument) {.Type = Typ, __VA_ARGS__}
+#define ADDRM_USE_PC(ArgType) IN_RANGE(ARG_PC_IDX_I8, ArgType, ARG_PC_MEM)
 #define NO_REG 17
 
 
@@ -330,6 +331,7 @@ static struct
 #define IN_I16(n) IN_RANGE(INT16_MIN, (int64_t)(n), INT16_MAX)
 #define IN_I32(n) IN_RANGE(INT32_MIN, (int64_t)(n), INT32_MAX)
 #define INS_COUNT (TOKEN_UNPK - TOKEN_ABCD)
+#define INS_BASE TOKEN_ABCD
 
 static bool IsAtEnd(void)
 {
@@ -756,6 +758,8 @@ static Token ConsumeIdentifier(char FirstLetter)
             INS(UNPK),
         },
     };
+#undef INS
+#undef KEYWORD
 
 
     char UpperFirst = TO_UPPER(FirstLetter);
@@ -977,29 +981,24 @@ static void Highlight(StringView Offender, StringView Line)
     }
 }
 
-static void ErrorAtArgs(StringView Offender, StringView Line, const char *Fmt, va_list Args)
+static void Display(StringView Offender, StringView Line, const char *MsgType, const char *Fmt, va_list Args)
 {
-    if (Assembler.Panic)
-        return;
-
     if (NULL != Assembler.ErrorStream)
     {
         int Offset = Offender.Ptr - Line.Ptr + 1;
         fprintf(Assembler.ErrorStream, 
                 "\n%s [Line %d, %d]:\n"
-                " | '"STRVIEW_FMT"'\n"
-                " |  ", 
+                "%5d  "STRVIEW_FMT"\n"
+                "    |  ", 
                 Assembler.SourceName, Assembler.LineCount, Offset,
+                Assembler.LineCount,
                 STRVIEW_FMT_ARG(Line)
         );
         Highlight(Offender, Line);
-        fprintf(Assembler.ErrorStream, "\n | Error: ");
+        fprintf(Assembler.ErrorStream, "\n    |  %s: ", MsgType);
         vfprintf(Assembler.ErrorStream, Fmt, Args);
         fputc('\n', Assembler.ErrorStream);
     }
-
-    Assembler.Error = true;
-    Assembler.Panic = true;
 }
 
 static size_t LineLen(const char *s)
@@ -1008,6 +1007,32 @@ static size_t LineLen(const char *s)
     while (s[i] && s[i] != '\n' && s[i] != '\r')
         i++;
     return i;
+}
+
+static void WarnAtToken(const Token *Tok, const char *Fmt, ...)
+{
+    if (Assembler.Panic)
+        return;
+
+    va_list Args;
+    va_start(Args, Fmt);
+
+    StringView Line = {.Ptr = Tok->Lexeme.Ptr - Tok->Offset + 1};
+    Line.Len = LineLen(Line.Ptr);
+    Display(Tok->Lexeme, Line, "Warning", Fmt, Args);
+
+    va_end(Args);
+}
+
+
+static void ErrorAtArgs(StringView Offender, StringView Line, const char *Fmt, va_list Args)
+{
+    if (Assembler.Panic)
+        return;
+
+    Display(Offender, Line, "Error", Fmt, Args);
+    Assembler.Error = true;
+    Assembler.Panic = true;
 }
 
 static void ErrorAtTokenArgs(const Token *Tok, const char *Fmt, va_list Args)
@@ -1063,6 +1088,44 @@ static void ErrorAtExpr(const char *Fmt, ...)
     Line.Len = LineLen(Line.Ptr);
     ErrorAtArgs(Current->Str, Line, Fmt, Args);
     va_end(Args);
+}
+
+static const char *LookupAddrModeName(ArgumentType AddressingMode)
+{
+    static const char *Lut[] = {
+        [ARG_INVALID]       = "Invalid",
+        [ARG_IMMEDIATE]     = "Immediate",  /* #Imm */
+        [ARG_ADDR]          = "Absolute",       /* Abs Addr */
+        [ARG_DATA_REG]      = "Data Register",   /* Dn */
+        [ARG_ADDR_REG]      = "Address Register",   /* An */
+        [ARG_IND_REG]       = "Register Indirect",    /* (An) */
+        [ARG_IND_PREDEC]    = "Predecrement Indirect", /* -(An) */
+        [ARG_IND_POSTINC]   = "Postincrement Indirect",/* (An)+ */
+
+        [ARG_IND_I16]       = "Indirect",    /* (I16, An) */
+        [ARG_IDX_I8]        = "Indexed Indirect",     /* (I8, An, Xn) */
+        [ARG_IDX_BD]        = "Indexed Indirect",     /* (Bd, An, Xn) */
+        [ARG_MEM_PRE]       = "Preindexed Memory Indirect",    /* ([Bd, An, Xn], Od) */
+        [ARG_MEM_POST]      = "Postindexed Memory Indirect",   /* ([Bd, An], Xn, Od) */
+        [ARG_MEM]           = "Memory Indirect",
+
+        [ARG_PC_I16]        = "PC-Relative",
+        [ARG_PC_IDX_I8]     = "Indexed PC-Relative",
+        [ARG_PC_BD]         = "Indexed PC-Relative",
+        [ARG_PC_MEM_POST]   = "Postindexed PC-Relative Indirect",
+        [ARG_PC_MEM_PRE]    = "Preindexed PC-Relative Indirect",
+        [ARG_PC_MEM]        = "PC-Relative Indirect",
+    };
+    return Lut[AddressingMode];
+}
+
+static void ErrorInvalidAddrMode(const Token *Instruction, ArgumentType AddrMode, const char *Location)
+{
+    ErrorAtToken(Instruction, "%s %s addressing mode is invalid for '"STRVIEW_FMT"'.",
+        LookupAddrModeName(AddrMode),
+        Location,
+        STRVIEW_FMT_ARG(Instruction->Lexeme)
+    );
 }
 
 
@@ -1698,37 +1761,7 @@ NoOuterDisplacement:
 
 
 
-static const char *LookupAddrModeName(ArgumentType AddressingMode)
-{
-    static const char *Lut[] = {
-        [ARG_INVALID]       = "Invalid",
-        [ARG_IMMEDIATE]     = "Immediate",  /* #Imm */
-        [ARG_ADDR]          = "Absolute",       /* Abs Addr */
-        [ARG_DATA_REG]      = "Data Register",   /* Dn */
-        [ARG_ADDR_REG]      = "Address Register",   /* An */
-        [ARG_IND_REG]       = "Register Indirect",    /* (An) */
-        [ARG_IND_PREDEC]    = "Predecrement Indirect", /* -(An) */
-        [ARG_IND_POSTINC]   = "Postincrement Indirect",/* (An)+ */
-
-        [ARG_IND_I16]       = "Indirect",    /* (I16, An) */
-        [ARG_IDX_I8]        = "Indexed Indirect",     /* (I8, An, Xn) */
-        [ARG_IDX_BD]        = "Indexed Indirect",     /* (Bd, An, Xn) */
-        [ARG_MEM_PRE]       = "Preindexed Memory Indirect",    /* ([Bd, An, Xn], Od) */
-        [ARG_MEM_POST]      = "Postindexed Memory Indirect",   /* ([Bd, An], Xn, Od) */
-        [ARG_MEM]           = "Memory Indirect",
-
-        [ARG_PC_I16]        = "PC-Relative",
-        [ARG_PC_IDX_I8]     = "Indexed PC-Relative",
-        [ARG_PC_BD]         = "Indexed PC-Relative",
-        [ARG_PC_MEM_POST]   = "Postindexed PC-Relative Indirect",
-        [ARG_PC_MEM_PRE]    = "Preindexed PC-Relative Indirect",
-        [ARG_PC_MEM]        = "PC-Relative Indirect",
-    };
-    return Lut[AddressingMode];
-}
-
-
-static Argument ConsumeInstructionArgument(unsigned InstructionSize, unsigned Size)
+static Argument ConsumeInstructionArgument(unsigned InstructionSize)
 {
     switch (ConsumeToken())
     {
@@ -1748,10 +1781,6 @@ static Argument ConsumeInstructionArgument(unsigned InstructionSize, unsigned Si
     } break;
     case TOKEN_ADDR_REG:    /* An */
     {
-        if (1 == Size)
-        {
-            Error("Byte size specifier is not applicable to address register.");
-        }
         return ARGUMENT(
             ARG_ADDR_REG,
             .As.An = Assembler.CurrentToken.Data.Int
@@ -1804,7 +1833,7 @@ static unsigned EncodeExtensionSize(uint32_t Displacement)
     return 3;
 }
 
-static EaEncoding EncodeEa(Argument Arg, unsigned Size)
+static EaEncoding EncodeEa(Argument Arg)
 {
 #define ENCODE_FULL_EXTENSION(Xn, WL, SCALE, BS, IS, BD_SIZE, I)\
     ( ((uint32_t)((Xn)        & 0xF) << 12)\
@@ -1971,8 +2000,10 @@ static EaEncoding EncodeEa(Argument Arg, unsigned Size)
         Encoding.OuterDisplacement = Arg.As.PC.Mem.Od;
     } break;
 
-    case ARG_INVALID: DIE(); break;
+    case ARG_INVALID: break;
     }
+
+    Encoding.RegMode = (Encoding.ModeReg << 3) | (Encoding.ModeReg >> 3);
     return Encoding;
 #undef ENCODE_BRIEF_EXTENSION
 #undef ENCODE_FULL_EXTENSION
@@ -2060,10 +2091,41 @@ static unsigned ConsumeSize(void)
     return Size;
 }
 
+static void IgnoreSize(const Token *Instruction)
+{
+    if (ConsumeIfNextTokenIs(TOKEN_DOT))
+    {
+        ConsumeSizeSpecifier();
+        WarnAtToken(Instruction, ""STRVIEW_FMT" ignores '"STRVIEW_FMT"' size specifier.", 
+                STRVIEW_FMT_ARG(Instruction->Lexeme),
+                STRVIEW_FMT_ARG(Assembler.CurrentToken.Lexeme)
+        );
+    }
+}
+
+
 static void ConsumeStatement(void)
 {
+#define INS(Mnemonic) (TOKEN_##Mnemonic - INS_BASE) 
+    static const uint16_t OpcodeLut[INS_COUNT] = {
+        [INS(ADDI)] = 03 << 9, 
+        [INS(ANDI)] = 01 << 9,
+        [INS(CMPI)] = 06 << 9,
+        [INS(EORI)] = 05 << 9,
+        [INS(ORI)]  = 00 << 9,
+        [INS(SUBI)] = 02 << 9,
+
+        [INS(BTST)] = 0 << 6,
+        [INS(BCHG)] = 1 << 6,
+        [INS(BCLR)] = 2 << 6,
+        [INS(BSET)] = 3 << 6,
+    };
+#undef INS
+#define LOOKUP_OPC(Ins) OpcodeLut[(Ins) - INS_BASE]
+#define CONSUME_COMMA() ConsumeOrError(TOKEN_COMMA, "Expected ',' after immediate.")
+
     TokenType Type = ConsumeToken();
-    Token Current = Assembler.CurrentToken;
+    Token Instruction = Assembler.CurrentToken;
     switch (Type)
     {
     case TOKEN_IDENTIFIER:
@@ -2077,42 +2139,131 @@ static void ConsumeStatement(void)
     case TOKEN_ORI:
     case TOKEN_SUBI:
     {
-        static const unsigned OpcodeLut[TOKEN_SUBI - TOKEN_ADDI] = {
-            03 << 1, /* ADDI */
-            01 << 1, /* ANDI */
-            06 << 1, /* CMPI */
-            05 << 1, /* EORI */
-            00 << 1, /* ORI */
-            02 << 1, /* SUBI */
-            /* 04 is bit instructions */
-        };
         unsigned Size = ConsumeSize();
         Argument Src = ConsumeImmediate();
-        ConsumeOrError(TOKEN_COMMA, "Expected ',' after immediate.");
-        Argument Dst = ConsumeInstructionArgument(4, Size);
+        CONSUME_COMMA();
+        Argument Dst = ConsumeInstructionArgument(4);
 
-        switch (Dst.Type)
+        if (ARG_IMMEDIATE == Dst.Type || ARG_ADDR_REG == Dst.Type || ADDRM_USE_PC(Dst.Type))
         {
-        case ARG_IMMEDIATE:
-        case ARG_ADDR_REG:
+            ErrorInvalidAddrMode(&Instruction, Dst.Type, "destination");
+        }
+
+        EaEncoding Ea = EncodeEa(Dst);
+        Emit(LOOKUP_OPC(Type)               /* opcode */
+            | (CountBits(Size - 1) << 6)    /* size */
+            | Ea.ModeReg,                   /* ea */
+            2
+        );
+        Emit(Src.As.Immediate, Size == 1? 2 : Size);
+        EmitEaExtension(Ea);
+    } break;
+    case TOKEN_BTST:
+    case TOKEN_BCHG:
+    case TOKEN_BCLR:
+    case TOKEN_BSET:
+    {
+        IgnoreSize(&Instruction);
+        Argument Src = ConsumeInstructionArgument(0);
+        CONSUME_COMMA();
+        if (Src.Type == ARG_IMMEDIATE)
         {
-            ErrorAtToken(&Current, "'%s' addressing mode is not valid for '"STRVIEW_FMT"'.", 
-                    LookupAddrModeName(Dst.Type),
-                    STRVIEW_FMT_ARG(Current.Lexeme)
-            );
-        } break;
-        default:
-        {
-            EaEncoding Ea = EncodeEa(Dst, Size);
-            Emit((OpcodeLut[Type - TOKEN_ADDI] << 8)
-                | (CountBits(Size - 1) << 6)
-                | Ea.ModeReg,
+            Argument Dst = ConsumeInstructionArgument(4);
+            EaEncoding DstEa = EncodeEa(Dst);
+            Emit(0x0800
+                | LOOKUP_OPC(Type)
+                | DstEa.ModeReg, 
                 2
             );
-            Emit(Src.As.Immediate, Size);
-            EmitEaExtension(Ea);
-        } break;
+            Emit(Src.As.Immediate, 2);
+            EmitEaExtension(DstEa);
         }
+        else if (Src.Type == ARG_DATA_REG)
+        {
+            Argument Dst = ConsumeInstructionArgument(2);
+            EaEncoding DstEa = EncodeEa(Dst);
+            Emit(0x0100
+                | ((uint32_t)Src.As.Dn << 9)
+                | LOOKUP_OPC(Type)
+                | DstEa.ModeReg,
+                2
+            );
+            EmitEaExtension(DstEa);
+        }
+        else
+        {
+            ErrorInvalidAddrMode(&Instruction, Src.Type, "source");
+        }
+    } break;
+    case TOKEN_MOVE:
+    case TOKEN_MOVEA:
+    {
+        unsigned Size = ConsumeSize();
+        Argument Src = ConsumeInstructionArgument(2);
+        CONSUME_COMMA();
+        Argument Dst = ConsumeInstructionArgument(2);
+
+        if (ARG_ADDR_REG == Dst.Type && 1 == Size)
+        {
+            ErrorAtToken(&Instruction, "Byte size specifier is invalid for address register.");
+        }
+        if ((TOKEN_MOVEA == Type && ARG_ADDR_REG != Dst.Type) 
+        || ADDRM_USE_PC(Dst.Type) || Dst.Type == ARG_IMMEDIATE)
+        {
+            ErrorInvalidAddrMode(&Instruction, Dst.Type, "destination");
+        }
+
+        /* encode size, unique for move */
+        uint32_t SizeEncoding = 2; /* long */
+        if (2 == Size)
+            SizeEncoding = 3; /* word */
+        else if (1 == Size)
+            SizeEncoding = 1; /* byte */
+        SizeEncoding <<= 12;
+        
+        /* encode ea */
+        /* TODO: 
+         *  Src PC AddrMode might be broken bc it depends on the length of Dst
+         * */
+        EaEncoding SrcEa = EncodeEa(Src);
+        EaEncoding DstEa = EncodeEa(Dst);
+
+        /* moveq? */
+        if (Src.Type == ARG_IMMEDIATE && Dst.Type == ARG_DATA_REG
+        && IN_I8(Src.As.Immediate) && 4 == Size)
+        {
+            Emit(0x7000 
+                | ((uint32_t)Dst.As.Dn << 9)
+                | (0xFF & Src.As.Immediate),
+                2
+            );
+        }
+        else /* move/movea */
+        {
+            Emit(SizeEncoding
+                | ((uint32_t)DstEa.RegMode << 6)
+                | SrcEa.ModeReg, 
+                2
+            );
+            EmitEaExtension(DstEa);
+            EmitEaExtension(SrcEa);
+        }
+    } break;
+    case TOKEN_MOVEQ:
+    {
+        IgnoreSize(&Instruction);
+        Argument Src = ConsumeImmediate();
+        CONSUME_COMMA();
+        Argument Dst = ConsumeInstructionArgument(2);
+        if (Dst.Type != ARG_DATA_REG)
+        {
+            ErrorInvalidAddrMode(&Instruction, Dst.Type, "destination");
+        }
+        Emit(0x7000 
+            | ((uint32_t)Dst.As.Dn << 9)
+            | (0xFF & Src.As.Immediate),
+            2
+        );
     } break;
     }
 
@@ -2120,6 +2271,7 @@ static void ConsumeStatement(void)
     {
         Unpanic();
     }
+#undef LOOKUP_OPC
 }
 
 MC68020MachineCode MC68020Assemble(AllocatorFn Allocator,
@@ -2163,6 +2315,5 @@ MC68020MachineCode MC68020Assemble(AllocatorFn Allocator,
     }
     return Assembler.MachineCode;
 }
-
 
 
