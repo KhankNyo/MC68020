@@ -17,3 +17,5 @@ addi #11, ([A1, D6.w*4], $ff)
 addi #12, ([A1, D7.w*4], $ffffffff)
 addi #13, ([$AA, A1, A1.w*4], $ffffffff)
 addi #14, ([$AAAAAAAA, A1, A1.w*4], $ffffffff)
+
+addi #15, ([$BB, A1], D7.l*4, $ff)

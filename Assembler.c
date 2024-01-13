@@ -1846,7 +1846,7 @@ static EaEncoding EncodeEa(Argument Arg, unsigned Size)
             Arg.As.Mem.Bd == 0,
             Arg.As.Mem.X.n == NO_REG,
             EncodeExtensionSize(Arg.As.Mem.Bd),
-            EncodeExtensionSize(Arg.As.Mem.Od)
+            04 + EncodeExtensionSize(Arg.As.Mem.Od)
         );
         Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
         Encoding.OuterDisplacement = Arg.As.Mem.Od;
@@ -1876,7 +1876,7 @@ static EaEncoding EncodeEa(Argument Arg, unsigned Size)
             Arg.As.Mem.Bd == 0,
             1,
             EncodeExtensionSize(Arg.As.Mem.Bd),
-            04 + EncodeExtensionSize(Arg.As.Mem.Od)
+            EncodeExtensionSize(Arg.As.Mem.Od)
         );
         Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
         Encoding.OuterDisplacement = Arg.As.Mem.Od;
