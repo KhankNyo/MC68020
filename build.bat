@@ -2,7 +2,7 @@
 
 
 set "CC=tcc"
-set "CCFLAGS=-Wall -Wextra -Wpedantic -Wno-missing-braces -IInclude"
+set "CCFLAGS=-Oz -Wall -Wextra -Wpedantic -Wno-missing-braces -IInclude"
 set "LDFLAGS= "
 set "LIBS= "
 
