@@ -59,6 +59,12 @@
 #endif
 
 
+#define TO_UPPER(Ch) ((Ch) & ~(1 << 5))
+#define IN_RANGE(lower, n, upper) ((lower) <= (n) && (n) <= (upper))
+#define IN_I8(n) IN_RANGE((int64_t)INT8_MIN, (int64_t)(n), (int64_t)INT8_MAX)
+#define IN_I16(n) IN_RANGE((int64_t)INT16_MIN, (int64_t)(n), (int64_t)INT16_MAX)
+#define IN_I32(n) IN_RANGE((int64_t)INT32_MIN, (int64_t)(n), (int64_t)INT32_MAX)
+
 
 static inline unsigned CountBits(uint64_t n)
 {
@@ -70,6 +76,15 @@ static inline unsigned CountBits(uint64_t n)
     }
     return i;
 }
+
+static inline uint64_t uMax(uint64_t a, uint64_t b)
+{ return a > b? a: b; }
+static inline int64_t iMax(int64_t a, int64_t b)
+{ return a > b? a: b; }
+static inline uint64_t uMin(uint64_t a, uint64_t b)
+{ return a > b? b: a; }
+static inline int64_t iMin(int64_t a, int64_t b)
+{ return a > b? b: a; }
 
 
 #endif /* COMMON_H */

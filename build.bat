@@ -1,8 +1,8 @@
 @echo off
 
 
-set "CC=tcc"
-set "CCFLAGS=-Oz -Wall -Wextra -Wpedantic -Wno-missing-braces -IInclude"
+set "CC=gcc"
+set "CCFLAGS=-Og -g -Oz -Wall -Wextra -Wpedantic -Wno-missing-braces -IInclude"
 set "LDFLAGS= "
 set "LIBS= "
 
