@@ -14,4 +14,16 @@ forward:
 
 smallforward:
     addq #2, d0
+    bgt.w wordforward
+    addq #2, d0
+    addq #2, d0
+wordforward:
+    addq #3, d0
+
+
+loop: bra loop
+    bra.w infront
+infront:
+    addq #4, d0
+    addq #8, d0
     

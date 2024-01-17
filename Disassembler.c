@@ -455,7 +455,7 @@ void MC68020Disassemble(const uint8_t *Buffer, size_t BufferSize,
                     else
                     {
                         Operand = DisasmModeReg(&Dis, Mode, Reg, Size);
-                        Immediate = CheckAndRead(&Dis, DisasmDecodeSize(Size));
+                        Immediate = CheckAndRead(&Dis, uMax(DisasmDecodeSize(Size), 2));
                     }
                     const char *Mnemonic = "???";
                     switch ((Opcode >> 9) & 0x7)
@@ -478,6 +478,8 @@ void MC68020Disassemble(const uint8_t *Buffer, size_t BufferSize,
         case 2: Instruction = DisasmMove(&Dis, Opcode, sizeof(uint32_t)); break;
         case 3: Instruction = DisasmMove(&Dis, Opcode, sizeof(uint16_t)); break;
         case 4:
+        {
+        } break;
         case 5:
         {
             unsigned Mode = (Opcode >> 3) & 07;
@@ -500,11 +502,42 @@ void MC68020Disassemble(const uint8_t *Buffer, size_t BufferSize,
             else 
             {
                 const char *Mnemonic = Opcode & 0x0100? "subq" : "addq";
-                unsigned Data = Opcode >> 9;
-                Data &= 07;
+                unsigned Data = 07 & (Opcode >> 9);
+                if (Data == 0)
+                    Data = 8;
                 SmallStr Arg = DisasmModeReg(&Dis, Mode, Reg, Size);
                 SmallStrFmt(Instruction, "%s%s %s, %u", Mnemonic, DisasmSize(Size), Arg.Data, Data);
             }
+        } break;
+        case 6: /* BSR, Bcc, BRA */
+        {
+            int32_t Offset = Opcode & 0xFF;
+            if (0 == Offset)
+                Offset = CheckAndRead(&Dis, 2);
+            else if (0xFF == Offset)
+                Offset = CheckAndRead(&Dis, 4);
+            uint32_t Location = OpcodeAddr + 2 + VirtualStartAddr + Offset;
+
+            if ((Opcode & 0x0F00) == 0x0100) /* BSR */
+            {
+                SmallStrFmt(Instruction, "bsr $%x", Location);
+            }
+            else if (0 == (Opcode & 0x0F00)) /* BRA */
+            {
+                SmallStrFmt(Instruction, "bra $%x", Location);
+            }
+            else
+            {
+                const char *ConditionalCode = DisasmConditionalCode(Opcode >> 8);
+                SmallStrFmt(Instruction, "b%s $%x", ConditionalCode, Location);
+            }
+        } break;
+        case 7:
+        {
+        } break;
+        default:
+        {
+            SmallStrFmt(Instruction, "???");
         } break;
         }
 

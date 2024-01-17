@@ -16,7 +16,7 @@ place:
     move #13, ([12345678, A0, D0], 12345678)
     move place, D0
 PCmem:
-    move rel ([place],D0,1), ([-2,A2,D1],10)
+    move ([place, PC],D0,1), ([-2,A2,D1],10)
 
     movea d0, a1
     ; movea.b d0, a1
