@@ -558,7 +558,7 @@ static Token ConsumeBinary(M68kAssembler *Assembler)
 #define INVALID_CONDITIONAL_CODE 16
 static unsigned GetConditionalCodeFromMnemonic(char UpperSecond, char UpperThird)
 {
-    unsigned ConditionalCode = 16;
+    unsigned ConditionalCode = INVALID_CONDITIONAL_CODE;
     switch (UpperSecond)
     {
     case 'T': ConditionalCode = 1; break;
@@ -3465,9 +3465,9 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             IntExpr(Assembler, "Branch target", Type, OffsetLocation) - (OffsetLocation);
         uint32_t Cond = Instruction.Data.ConditionalCode;
 
-        if (TOKEN_BRA == Type)
+        if (TOKEN_BRA == Instruction.Type)
             Cond = 0;
-        else if (TOKEN_BSR == Type)
+        else if (TOKEN_BSR == Instruction.Type)
             Cond = 1;
         Cond <<= 8;
 

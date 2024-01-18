@@ -98,7 +98,7 @@ static SmallStr DisasmMemoryIndirect(DisasmBuffer *Dis,
             unsigned BaseSize = DisasmDecodeExtensionSize(ExtensionWord >> 4);
             BaseDisplacement = CheckAndRead(Dis, BaseSize);
             if (2 == BaseSize)
-                BaseDisplacement = (int32_t)(int16_t)BaseDisplacement;
+                BaseDisplacement = SEX(32, 16)BaseDisplacement;
         }
 
         /* index suppressed? */
@@ -122,7 +122,7 @@ static SmallStr DisasmMemoryIndirect(DisasmBuffer *Dis,
             } break;
             case 2: /* word outer */
             {
-                int32_t OuterDisplacement = (int32_t)(int16_t)CheckAndRead(Dis, 2);
+                int32_t OuterDisplacement = SEX(32, 16)CheckAndRead(Dis, 2);
                 SmallStrFmt(Ret, "([%d, %s], %d)", 
                     BaseDisplacement,
                     BaseRegister,
@@ -168,7 +168,7 @@ static SmallStr DisasmMemoryIndirect(DisasmBuffer *Dis,
             } break;
             case 2: /* pre index, word outer */
             {
-                int32_t OuterDisplacement = (int32_t)(int16_t)CheckAndRead(Dis, 2);
+                int32_t OuterDisplacement = SEX(32, 16)CheckAndRead(Dis, 2);
                 SmallStrFmt(Ret, "([%d, %s, %s.%c*%u], %d)", 
                     BaseDisplacement,
                     BaseRegister,
@@ -203,7 +203,7 @@ static SmallStr DisasmMemoryIndirect(DisasmBuffer *Dis,
             } break;
             case 6: /* post index, word outer */
             {
-                int32_t OuterDisplacement = (int32_t)(int16_t)CheckAndRead(Dis, 2);
+                int32_t OuterDisplacement = SEX(32, 16)CheckAndRead(Dis, 2);
                 SmallStrFmt(Ret, "([%d, %s], %s.%c*%u, %d)", 
                     BaseDisplacement,
                     BaseRegister,
@@ -255,7 +255,7 @@ static SmallStr DisasmModeReg(DisasmBuffer *Dis, unsigned Mode, unsigned Reg, un
     case 4: SmallStrFmt(Ret, "-(%s)", sRegisterName[Reg + 8]); break;
     case 5: 
     {
-        int32_t Displacement = (int32_t)(int16_t)CheckAndRead(Dis, 2);
+        int32_t Displacement = SEX(32, 16)CheckAndRead(Dis, 2);
         SmallStrFmt(Ret, "(%d, %s)", Displacement, sRegisterName[Reg + 8]);
     } break;
     case 6:
@@ -267,7 +267,7 @@ static SmallStr DisasmModeReg(DisasmBuffer *Dis, unsigned Mode, unsigned Reg, un
         {
         case 0:
         {
-            int32_t Address = (int32_t)(int16_t)CheckAndRead(Dis, 2);
+            int32_t Address = SEX(32, 16)CheckAndRead(Dis, 2);
             SmallStrFmt(Ret, "($%x).w", Address);
         } break;
         case 1:
@@ -277,7 +277,7 @@ static SmallStr DisasmModeReg(DisasmBuffer *Dis, unsigned Mode, unsigned Reg, un
         } break;
         case 2:
         {
-            int32_t Displacement = (int32_t)(int16_t)CheckAndRead(Dis, 2);
+            int32_t Displacement = SEX(32, 16)CheckAndRead(Dis, 2);
             SmallStrFmt(Ret, "(%d, PC)", Displacement);
         } break;
         case 3:
@@ -287,7 +287,7 @@ static SmallStr DisasmModeReg(DisasmBuffer *Dis, unsigned Mode, unsigned Reg, un
             unsigned Size = uMax(OperandSize, 2);
             int32_t Immediate = CheckAndRead(Dis, Size);
             if (2 == Size)
-                Immediate = (int32_t)(int16_t)Immediate;
+                Immediate = SEX(32, 16)Immediate;
             SmallStrFmt(Ret, "#%d", Immediate);
         } break;
         default:
@@ -520,7 +520,7 @@ void MC68020Disassemble(const uint8_t *Buffer, size_t BufferSize,
             Size &= 03;
             if ((Opcode & 0xF0F8) == 0x50C8) /* DBcc */
             {
-                int32_t BranchOffset = (int32_t)(int16_t)CheckAndRead(&Dis, 2);
+                int32_t BranchOffset = SEX(32, 16)CheckAndRead(&Dis, 2);
                 uint32_t Location = VirtualStartAddr + OpcodeAddr + 2 + BranchOffset;
                 const char *Cond = DisasmConditionalCode(Opcode >> 8);
                 SmallStrFmt(Instruction, "db%s %s, %x", Cond, sRegisterName[Reg], Location);
@@ -543,10 +543,10 @@ void MC68020Disassemble(const uint8_t *Buffer, size_t BufferSize,
         } break;
         case 6: /* BSR, Bcc, BRA */
         {
-            int32_t Offset = Opcode & 0xFF;
+            int32_t Offset = SEX(32, 8)(Opcode & 0xFF);
             if (0 == Offset)
                 Offset = CheckAndRead(&Dis, 2);
-            else if (0xFF == Offset)
+            else if (-1 == Offset)
                 Offset = CheckAndRead(&Dis, 4);
             uint32_t Location = OpcodeAddr + 2 + VirtualStartAddr + Offset;
 
@@ -558,7 +558,7 @@ void MC68020Disassemble(const uint8_t *Buffer, size_t BufferSize,
             {
                 SmallStrFmt(Instruction, "bra $%x", Location);
             }
-            else
+            else /* bcc */
             {
                 const char *ConditionalCode = DisasmConditionalCode(Opcode >> 8);
                 SmallStrFmt(Instruction, "b%s $%x", ConditionalCode, Location);
@@ -673,6 +673,62 @@ void MC68020Disassemble(const uint8_t *Buffer, size_t BufferSize,
             {
                 SmallStr Src = DisasmModeReg(&Dis, Mode, Reg, DisasmDecodeSize(Size));
                 SmallStrFmt(Instruction, "cmp%s %s, %s", DisasmEncodedSize(Size), Src.Data, sRegisterName[LeftReg]);
+            }
+        } break;
+        case 12: /* MULU/S, ABCD, EXG, AND */
+        {
+            unsigned LeftReg = (Opcode >> 9) & 07,
+                     Mode = (Opcode >> 3) & 07,
+                     Reg = Opcode & 07,
+                     Size = (Opcode >> 6) & 03;
+            if (03 == Size) /* MUL */
+            {
+                const char *Mnemonic = (Opcode & 0x0100)? "muls": "mulu";
+                SmallStr Src = DisasmModeReg(&Dis, Mode, Reg, 2);
+                SmallStrFmt(Instruction, "%s.w %s, %s", Mnemonic, Src.Data, sRegisterName[LeftReg]);
+            }
+            else if (Opcode & 0x0100) /* AND Dn, <ea>; ABCD; EXG */
+            {
+                if (Mode <= 1) /* ABCD, EXG */
+                {
+                    switch (Size)
+                    {
+                    case 0: /* ABCD */
+                    {
+                        Instruction = DisasmPreDecOrDn("abcd.b", Opcode);
+                    } break;
+                    case 1: /* exg Dx, Dy; exg Ax, Ay */
+                    {
+                        const char *Src = Opcode & 0x0008? 
+                            sRegisterName[LeftReg + 8] : sRegisterName[LeftReg];
+                        const char *Dst = Opcode & 0x0008? 
+                            sRegisterName[Reg + 8] : sRegisterName[Reg];
+                        SmallStrFmt(Instruction, "exg.l %s, %s", Src, Dst);
+                    } break;
+                    case 2: /* exg Dx, Ay */
+                    {
+                        SmallStrFmt(Instruction, "exg.l %s, %s", sRegisterName[LeftReg], sRegisterName[Reg + 8]);
+                    } break;
+                    default:
+                    {
+                        Instruction = (SmallStr){ "???" };
+                    } break;
+                    }
+                }
+                else /* AND Dn, <ea> */
+                {
+                    SmallStr Ea = DisasmModeReg(&Dis, Mode, Reg, DisasmDecodeSize(Size));
+                    const char *Dst = Ea.Data;
+                    const char *Src = sRegisterName[LeftReg];
+                    SmallStrFmt(Instruction, "and%s %s, %s", DisasmEncodedSize(Size), Src, Dst);
+                }
+            }
+            else /* AND <ea>, Dn */
+            {
+                SmallStr Ea = DisasmModeReg(&Dis, Mode, Reg, DisasmDecodeSize(Size));
+                const char *Dst = sRegisterName[LeftReg];
+                const char *Src = Ea.Data;
+                SmallStrFmt(Instruction, "and%s %s, %s", DisasmEncodedSize(Size), Src, Dst);
             }
         } break;
         default:
