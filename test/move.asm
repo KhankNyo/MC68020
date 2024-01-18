@@ -27,5 +27,9 @@ PCmem:
     move.w d0, d1
     move.l d0, d1
     movea d0, a1
+
+    moveq.l #100, d2
+    moveq.l #-1, d1
+    ;moveq.l #256, d3
     
 
