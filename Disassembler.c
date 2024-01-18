@@ -731,6 +731,40 @@ void MC68020Disassemble(const uint8_t *Buffer, size_t BufferSize,
                 SmallStrFmt(Instruction, "and%s %s, %s", DisasmEncodedSize(Size), Src, Dst);
             }
         } break;
+        case 14: /* shifts */
+        {
+            unsigned Reg = Opcode & 07,
+                     Size = (Opcode >> 6) & 03,
+                     Shamt = (Opcode >> 9) & 07,
+                     Mode = (Opcode >> 3) & 07;
+            const char Direction = Opcode & 0x0100? 'l': 'r';
+            static const char ShiftOpLut[4][4] = {
+                "as", "ls", "rox", "ro"
+            };
+
+            if (03 == Size) /* shift by 1 only */
+            {
+                SmallStr Operand = DisasmModeReg(&Dis, Mode, Opcode, 1);
+                if (Shamt < 4)
+                    SmallStrFmt(Instruction, "%s%c.w %s", ShiftOpLut[Shamt], Direction, Operand.Data);
+                else
+                    Instruction = (SmallStr) { "???" };
+            }
+            else if (Opcode & 0x0020) /* shift by reg */
+            {
+                SmallStrFmt(Instruction, "%s%c%s %s, %s", 
+                    ShiftOpLut[Mode & 03], Direction, DisasmEncodedSize(Size), 
+                    sRegisterName[Shamt], sRegisterName[Reg]
+                );
+            }
+            else /* shift by imm */
+            {
+                SmallStrFmt(Instruction, "%s%c%s #%u, %s", 
+                    ShiftOpLut[Mode & 03], Direction, DisasmEncodedSize(Size),
+                    Shamt, sRegisterName[Reg]
+                );
+            }
+        } break;
         default:
         {
             SmallStrFmt(Instruction, "???");

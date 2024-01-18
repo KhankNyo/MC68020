@@ -2470,6 +2470,15 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         [INS(RTS)]  = 0x4E75,
         [INS(TRAPV)]= 0x4E76,
         [INS(RTR)]  = 0x4E77,
+
+        [INS(ASR)] = 0,
+        [INS(ASL)] = 0,
+        [INS(LSL)] = 1,
+        [INS(LSR)] = 1,
+        [INS(ROXL)] = 2,
+        [INS(ROXR)] = 2,
+        [INS(ROL)] = 3,
+        [INS(ROR)] = 3,
     };
 #undef INS
 #define LOOKUP_OPC(Ins) OpcodeLut[(Ins) - INS_BASE]
@@ -3336,22 +3345,22 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         unsigned Size = ConsumeSize(Assembler);
         Argument First = ConsumeEa(Assembler, 2, 2); /* for memory only */
 
-        if (ARG_DATA_REG == First.Type)
+        if (ARG_DATA_REG == First.Type && ConsumeIfNextTokenIs(Assembler, TOKEN_COMMA)) /* shift reg by reg */
         {
             unsigned CountReg = First.As.Dn;
-            CONSUME_COMMA();
             unsigned Reg = ConsumeDataReg(Assembler);
 
             Emit(Assembler, 
-                0xE020
+                0xE020 | LOOKUP_OPC(Type)
                 | (CountReg << 9)
                 | DirectionLeft
                 | (ENCODE_SIZE(Size) << 6)
+                | (LOOKUP_OPC(Type) << 3)
                 | Reg, 
                 2
             );
         }
-        else if (ARG_IMMEDIATE == First.Type)
+        else if (ARG_IMMEDIATE == First.Type) /* shift reg by imm */
         {
             unsigned ShiftCount = First.As.Immediate;
             if (!IN_RANGE(1, ShiftCount, 8))
@@ -3367,11 +3376,12 @@ static void ConsumeStatement(M68kAssembler *Assembler)
                 | (ShiftCount << 9)
                 | DirectionLeft
                 | (ENCODE_SIZE(Size) << 6)
+                | (LOOKUP_OPC(Type) << 3)
                 | Reg,
                 2
             );
         }
-        else
+        else /* memory shift */
         {
             if (ARG_ADDR_REG == First.Type || ARG_IMMEDIATE == First.Type || AddrmUsePC(First))
             {
@@ -3383,9 +3393,10 @@ static void ConsumeStatement(M68kAssembler *Assembler)
                     STRVIEW_FMT_ARG(Instruction.Lexeme)
                 );
             }
-            EaEncoding Ea = EncodeEa(First, 1);
+            EaEncoding Ea = EncodeEa(First, 2);
             Emit(Assembler, 
                 0xE0C0
+                | (LOOKUP_OPC(Type) << 9)
                 | DirectionLeft 
                 | Ea.ModeReg,
                 2 
