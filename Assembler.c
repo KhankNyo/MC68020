@@ -1947,10 +1947,10 @@ static Argument ConsumeEa(M68kAssembler *Assembler, unsigned InstructionSize, un
     {
         ConsumeOrError(Assembler, TOKEN_LPAREN, "Expected '(' after '-'.");
         ConsumeOrError(Assembler, TOKEN_ADDR_REG, "Expected address register.");
-        ConsumeOrError(Assembler, TOKEN_RPAREN, "Expected ')' after register.");
         Arg = ARGUMENT(ARG_IND_PREDEC,
             .As.PreDec.An = Assembler->CurrentToken.Data.Int
         );
+        ConsumeOrError(Assembler, TOKEN_RPAREN, "Expected ')' after register.");
     }
     else
     {
@@ -2437,8 +2437,8 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         [INS(OR)]  = 0x8000,
         [INS(AND)] = 0xC000,
 
-        [INS(ADDA)] = 0xD << 12,
-        [INS(SUBA)] = 0x9 << 12,
+        [INS(ADDA)] = 0xD0C0,
+        [INS(SUBA)] = 0x90C0,
         [INS(ADDX)] = 0xD100,
         [INS(SUBX)] = 0x9100,
 
@@ -2446,6 +2446,9 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         [INS(DIVS)] = 0x81C0,
         [INS(MULU)] = 0xC0C0,
         [INS(DIVU)] = 0x80C0,
+
+        [INS(SBCD)] = 0x8100,
+        [INS(ABCD)] = 0xC100,
 
         [INS(CMP2)] = 0x00C00000,
         [INS(CHK2)] = 0x00C00800,
@@ -2476,7 +2479,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
      : Size == 2? 3 << 12 \
      : 1 << 12)
 #define ENCODE_SIZE(Size)\
-    (CountBits(Size - 1))
+    (CountBits((Size) - 1))
 #define NO_BYTE_SIZE(Size) if (1 == Size) Error(Assembler, "Invalid size specifier for "STRVIEW_FMT, STRVIEW_FMT_ARG(Instruction.Lexeme))
 
     TokenType Type = ConsumeToken(Assembler);
@@ -2685,9 +2688,12 @@ static void ConsumeStatement(M68kAssembler *Assembler)
     {
         AssertSize(Assembler, &Instruction, 4);
         uint32_t ImmLocation = Assembler->MachineCode.Size + 1;
-        uint32_t Immediate = ConsumeImmediate(Assembler, ImmLocation, UNDEF_IMM8);
+        int32_t Immediate = ConsumeImmediate(Assembler, ImmLocation, UNDEF_IMM8);
+        if (!IN_I8(Immediate))
+            ErrorAtLastExpr(Assembler, "Immediate must be in range of -128 to 127.");
         CONSUME_COMMA();
         unsigned Dst = ConsumeDataReg(Assembler);
+
         Emit(Assembler, 
             0x7000 
             | (Dst << 9)
@@ -2800,8 +2806,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
          * this is important because order matters (addx encoding) */
         if (Dst.Type == ARG_DATA_REG) 
         {
-            if ((TOKEN_OR == Type || TOKEN_AND == Type)
-            && (Src.Type == ARG_ADDR_REG))
+            if ((TOKEN_OR == Type || TOKEN_AND == Type) && Src.Type == ARG_ADDR_REG)
             {
                 ErrorInvalidAddrMode(Assembler, &Instruction, Src, "source");
             }
@@ -2922,7 +2927,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         CONSUME_COMMA();
         Argument Dst = ConsumeEa(Assembler, 2, Size);
 
-        if (Dst.Type == ARG_DATA_REG || Dst.Type == ARG_IMMEDIATE || AddrmUsePC(Dst))
+        if (Dst.Type == ARG_ADDR_REG || Dst.Type == ARG_IMMEDIATE || AddrmUsePC(Dst))
         {
             ErrorInvalidAddrMode(Assembler, &Instruction, Dst, "destination");
         }
@@ -3130,7 +3135,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             ErrorInvalidAddrMode(Assembler, &Instruction, Dst, "both source and destination");
         }
         Emit(Assembler, 
-            0xB104
+            0xB108
             | ((uint32_t)Dst.As.PostInc.An << 9)
             | (ENCODE_SIZE(Size) << 6)
             | (Src.As.PostInc.An),
@@ -3421,13 +3426,13 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         unsigned Opcode = 0;
         if (X.Type == ARG_DATA_REG)
         {
-            Opcode = 0xC100 
+            Opcode = LOOKUP_OPC(Type)
                 | ((uint32_t)X.As.Dn << 9) 
                 | Y.As.Dn;
         }
         else if (X.Type == ARG_IND_PREDEC)
         {
-            Opcode = 0xC108
+            Opcode = LOOKUP_OPC(Type) | 0x08
                 | ((uint32_t)X.As.PreDec.An << 9)
                 | Y.As.PreDec.An;
         }
