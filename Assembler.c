@@ -41,6 +41,14 @@ typedef enum TokenType
     TOKEN_SR,
     TOKEN_PC,
 
+    /* directives */
+    TOKEN_ORG,
+    TOKEN_ALIGN,
+    TOKEN_DB,
+    TOKEN_DW,
+    TOKEN_DL,
+    TOKEN_DQ,
+
     /* instructions */
     TOKEN_ABCD,
     TOKEN_ADD,
@@ -173,16 +181,23 @@ typedef union TokenData
 {
     uint64_t Int;
     double Flt;
-    StringView String;
+    StringView Str;
     unsigned ConditionalCode;
 } TokenData;
 
+typedef enum ValueType 
+{
+    VAL_INT = 0,
+    VAL_FLT,
+    VAL_STR,
+} ValueType;
 typedef struct Value 
 {
-    bool IsFloat;
+    ValueType Type;
     union {
         double Flt;
         uint64_t Int;
+        StringView Str;
     } As;
 } Value;
 
@@ -229,7 +244,7 @@ typedef struct Argument
     Expression Expr;
     union {
         uint32_t An, Dn;
-        uint32_t Addr, Immediate;
+        int32_t Addr, Immediate;
         struct {
             uint32_t An;
         } PreDec, PostInc;
@@ -264,10 +279,10 @@ typedef struct EaEncoding
     uint16_t Extension;
     bool HasImmediate;
     union {
-        uint32_t Immediate;
-        uint32_t BaseDisplacement;
+        int32_t Immediate;
+        int32_t BaseDisplacement;
     } u;
-    uint32_t OuterDisplacement;
+    int32_t OuterDisplacement;
 } EaEncoding;
 #define NO_EXTENSION 0xFFFF
 
@@ -309,12 +324,13 @@ typedef struct M68kAssembler
     MC68020MachineCode MachineCode;
 
     uint32_t IdenCount;
-    uint32_t IsFloat[1048/32];
+    uint32_t IdenType[1024/16];
     StringView Idens[1048];
     int IdenLine[1048];
     union {
         uint64_t Int;
         double Flt;
+        StringView Str;
     } IdenData[1048];
 
     Expression CurrentExpr;
@@ -434,8 +450,8 @@ static Token MakeTokenWithData(M68kAssembler *Assembler, TokenType Type, TokenDa
 static Token ErrorTokenStr(M68kAssembler *Assembler, const char *Msg, size_t MsgLen)
 {
     return MakeTokenWith(TOKEN_ERROR, 
-        .String.Ptr = Msg,
-        .String.Len = MsgLen
+        .Str.Ptr = Msg,
+        .Str.Len = MsgLen
     );
 }
 #define ErrorToken(LiteralMsg) ErrorTokenStr(Assembler, LiteralMsg, sizeof LiteralMsg)
@@ -643,6 +659,7 @@ static Token ConsumeIdentifier(M68kAssembler *Assembler, char FirstLetter)
             INS(ANDI),
             INS(ASR), 
             INS(ASL),
+            KEYWORD(ALIGN),
         },
         ['B'] = {
             INS(Bcc),
@@ -683,6 +700,10 @@ static Token ConsumeIdentifier(M68kAssembler *Assembler, char FirstLetter)
             INS(DIVU),
             INS(DIVSL),
             INS(DIVUL),
+            KEYWORD(DB),
+            KEYWORD(DW),
+            KEYWORD(DL),
+            KEYWORD(DQ),
         },
         ['E'] = {
             INS(EOR),
@@ -725,6 +746,7 @@ static Token ConsumeIdentifier(M68kAssembler *Assembler, char FirstLetter)
         ['O'] = {
             INS(OR),
             INS(ORI),
+            KEYWORD(ORG),
         },
         ['P'] = {
             INS(PACK),
@@ -867,6 +889,43 @@ static Token ConsumeIdentifier(M68kAssembler *Assembler, char FirstLetter)
     return MakeToken(TOKEN_IDENTIFIER);
 }
 
+static Token ConsumeString(M68kAssembler *Assembler)
+{
+    int Line = Assembler->LineCount;
+    const char *LineStart = Assembler->LineStart;
+    Token Tok;
+    while (!IsAtEnd(Assembler) && '\'' != Assembler->CurrPtr[0])
+    {
+        if (ConsumeIfNextCharIs(Assembler, '\n'))
+        {
+            Line++;
+            LineStart = Assembler->CurrPtr;
+        }
+        else if (ConsumeIfNextCharIs(Assembler, '\\'))
+        {
+            ConsumeIfNextCharIs(Assembler, '\'');
+        }
+        else Assembler->CurrPtr++;
+    }
+
+    if (IsAtEnd(Assembler))
+    {
+        Tok = ErrorToken("Unexpected EOF in string literal.");
+    }
+    else
+    {
+        ConsumeIfNextCharIs(Assembler, '\'');
+
+        Tok = MakeToken(TOKEN_LIT_STR);
+        Tok.Data.Str = (StringView) {
+            .Ptr = Tok.Lexeme.Ptr + 1,
+            .Len = Tok.Lexeme.Len - 2,
+        };
+    }
+    Assembler->LineCount = Line;
+    Assembler->LineStart = LineStart;
+    return Tok;
+}
 
 
 static Token Tokenize(M68kAssembler *Assembler)
@@ -883,6 +942,7 @@ static Token Tokenize(M68kAssembler *Assembler)
     switch (Current)
     {
     case '\0': return MakeToken(TOKEN_EOF);
+    case '\'': return ConsumeString(Assembler);
     case '$': return ConsumeHex(Assembler);
     case '+': return MakeToken(TOKEN_PLUS);
     case '-': return MakeToken(TOKEN_MINUS);
@@ -1151,7 +1211,7 @@ static TokenType ConsumeToken(M68kAssembler *Assembler)
     Assembler->NextToken = Tokenize(Assembler);
     if (TOKEN_ERROR == Assembler->NextToken.Type)
     {
-        ErrorAtToken(Assembler, &Assembler->NextToken, STRVIEW_FMT, STRVIEW_FMT_ARG(Assembler->NextToken.Data.String));
+        ErrorAtToken(Assembler, &Assembler->NextToken, STRVIEW_FMT, STRVIEW_FMT_ARG(Assembler->NextToken.Data.Str));
     }
     return Assembler->CurrentToken.Type;
 }
@@ -1187,6 +1247,21 @@ static bool ConsumeOrError(M68kAssembler *Assembler, TokenType Type, const char 
 }
 
 
+static ValueType GetIdenType(M68kAssembler *Assembler, unsigned Index)
+{
+    return 0x3 & (Assembler->IdenType[Index / 16] >> ((Index % 16)*2));
+}
+
+static void SetIdenType(M68kAssembler *Assembler, unsigned Index, ValueType Type)
+{
+    uint32_t Slot = Assembler->IdenType[Index / 16];
+
+    Slot &= ~(0x3 << ((Index % 16)*2));         /* mask out old value at index */
+    Slot |= (uint32_t)Type << ((Index % 16)*2); /* set new value at index */
+
+    Assembler->IdenType[Index / 16] = Slot;
+}
+
 
 static bool Find(M68kAssembler *Assembler, StringView Identifier, Value *Out)
 {
@@ -1195,14 +1270,12 @@ static bool Find(M68kAssembler *Assembler, StringView Identifier, Value *Out)
         if (Identifier.Len == Assembler->Idens[i].Len 
         && StrSliceEquNoCase(Identifier.Ptr, Assembler->Idens[i].Ptr, Identifier.Len))
         {
-            if (Assembler->IsFloat[i / 32] & (1ul << (i % 32)))
+            Out->Type = GetIdenType(Assembler, i);
+            switch (Out->Type)
             {
-                Out->IsFloat = true;
-                Out->As.Flt = Assembler->IdenData[i].Flt;
-            }
-            else
-            {
-                Out->As.Int = Assembler->IdenData[i].Int;
+            case VAL_INT: Out->As.Int = Assembler->IdenData[i].Int; break;
+            case VAL_FLT: Out->As.Flt = Assembler->IdenData[i].Flt; break;
+            case VAL_STR: Out->As.Str = Assembler->IdenData[i].Str; break;
             }
             return true;
         }
@@ -1218,8 +1291,9 @@ static Value Factor(M68kAssembler *Assembler)
 {
     switch (ConsumeToken(Assembler))
     {
-    case TOKEN_LIT_INT: return (Value) { .As.Int = Assembler->CurrentToken.Data.Int };
-    case TOKEN_LIT_FLT: return (Value) { .As.Flt = Assembler->CurrentToken.Data.Flt, .IsFloat = true };
+    case TOKEN_LIT_INT: return (Value) { .As.Int = Assembler->CurrentToken.Data.Int, .Type = VAL_INT, };
+    case TOKEN_LIT_FLT: return (Value) { .As.Flt = Assembler->CurrentToken.Data.Flt, .Type = VAL_FLT, };
+    case TOKEN_LIT_STR: return (Value) { .As.Str = Assembler->CurrentToken.Data.Str, .Type = VAL_STR, };
     case TOKEN_IDENTIFIER:
     {
         Value Val = { 0 };
@@ -1242,21 +1316,28 @@ static Value Factor(M68kAssembler *Assembler)
     case TOKEN_MINUS:
     {
         Value Val = Factor(Assembler);
-        if (Val.IsFloat)
-            Val.As.Flt = -Val.As.Flt;
-        else
-            Val.As.Int = -Val.As.Int;
+        switch (Val.Type)
+        {
+        case VAL_FLT: Val.As.Flt = -Val.As.Flt; break;
+        case VAL_INT: Val.As.Int = -Val.As.Int; break;
+        case VAL_STR: Error(Assembler, "Cannot negate a string."); break;
+        }
         return Val;
     } break;
     case TOKEN_PLUS:
     {
-        return Factor(Assembler);
+        Value Val = Factor(Assembler);
+        if (Val.Type == VAL_STR)
+            Error(Assembler, "'+' is not applicable to strings.");
+        return Val;
     } break;
     case TOKEN_TILDE:
     {
         Value Val = Factor(Assembler);
-        if (Val.IsFloat)
+        if (Val.Type == VAL_FLT)
             Error(Assembler, "'~' is not applicable to floating-point number.");
+        if (Val.Type == VAL_STR)
+            Error(Assembler, "'~' is not applicable to strings.");
         Val.As.Int = ~Val.As.Int;
         return Val;
     } break;
@@ -1277,10 +1358,14 @@ static Value Factor(M68kAssembler *Assembler)
 
 #define BIN_OP(VLeft, Op, Val) do {\
     Value Right = Val;\
-    if ((VLeft).IsFloat) {\
-        double Flt = (Right).IsFloat ? (Right).As.Flt : (Right).As.Int;\
+    if (VAL_STR == Right.Type || VAL_STR == (VLeft).Type) {\
+        Error(Assembler, "'"#Op"' is not applicable to strings.");\
+        break;\
+    }\
+    if ((VLeft).Type == VAL_FLT) {\
+        double Flt = (Right).Type == VAL_FLT ? (Right).As.Flt : (Right).As.Int;\
         (VLeft).As.Flt = (VLeft).As.Flt Op Flt;\
-    } else if ((Right).IsFloat) {\
+    } else if ((Right).Type == VAL_FLT) {\
         double Dst = (VLeft).As.Int;\
         (VLeft).As.Flt = Dst Op (Right).As.Flt;\
     } else {\
@@ -1288,10 +1373,10 @@ static Value Factor(M68kAssembler *Assembler)
     }\
 } while (0)
 
-#define INT_ONLY(VLeft, Op, Val, ...) do {\
+#define INT_ONLY(VLeft, Op, Val) do {\
     Value Right = Val;\
-    if ((VLeft).IsFloat || Right.IsFloat) {\
-        Error(Assembler, __VA_ARGS__);\
+    if ((VLeft).Type != VAL_INT || Right.Type != VAL_INT) {\
+        Error(Assembler, "'"#Op"' is not applicable to non-integer values.");\
         return (VLeft);\
     }\
     (VLeft).As.Int Op##= Right.As.Int;\
@@ -1324,7 +1409,7 @@ static Value ExprMulDiv(M68kAssembler *Assembler)
                 Error(Assembler, "Division by 0");
                 break;
             }
-            INT_ONLY(Left, %, R, "Cannot perform modulo on floating-point number.");
+            INT_ONLY(Left, %, R);
         }
         else break;
     }
@@ -1352,18 +1437,18 @@ static Value ExprBitwise(M68kAssembler *Assembler)
     {
         if (ConsumeIfNextTokenIs(Assembler, TOKEN_LSHIFT))
         {
-            INT_ONLY(Left, <<, ExprAddSub(Assembler), "Cannot perform '<<' on floating-point number.");
+            INT_ONLY(Left, <<, ExprAddSub(Assembler));
         }
         else if (ConsumeIfNextTokenIs(Assembler, TOKEN_RSHIFT))
         {
-            INT_ONLY(Left, >>, ExprAddSub(Assembler), "Cannot perform '>>' on floating-point number.");
+            INT_ONLY(Left, >>, ExprAddSub(Assembler));
         }
         else if (ConsumeIfNextTokenIs(Assembler, TOKEN_RSHIFT_ARITH))
         {
             Value Right = ExprAddSub(Assembler);
-            if (Left.IsFloat || Right.IsFloat)
+            if (Left.Type != VAL_INT || Right.Type != VAL_INT)
             {
-                Error(Assembler, "Cannot perform '>-' on floating-point number.");
+                Error(Assembler, "'>-' is not applicable to non-integer values.");
                 return Left;
             }
             uint64_t Sign = Left.As.Int & (1ull << 63);
@@ -1406,7 +1491,7 @@ static Value ExprAnd(M68kAssembler *Assembler)
     Value Left = ExprEquality(Assembler);
     while (!Assembler->Panic && !NoMoreToken(Assembler) && ConsumeIfNextTokenIs(Assembler, TOKEN_AMPERSAND))
     {
-        INT_ONLY(Left, &, ExprEquality(Assembler), "Cannot perform '&' on floating-point number.");
+        INT_ONLY(Left, &, ExprEquality(Assembler));
     }
     return Left;
 }
@@ -1416,7 +1501,7 @@ static Value ExprXor(M68kAssembler *Assembler)
     Value Left = ExprAnd(Assembler);
     while (!Assembler->Panic && !NoMoreToken(Assembler) && ConsumeIfNextTokenIs(Assembler, TOKEN_CARET))
     {
-        INT_ONLY(Left, ^, ExprAnd(Assembler), "Cannot perform '^' on floating-point number.");
+        INT_ONLY(Left, ^, ExprAnd(Assembler));
     }
     return Left;
 }
@@ -1426,7 +1511,7 @@ static Value ExprOr(M68kAssembler *Assembler)
     Value Left = ExprXor(Assembler);
     while (!Assembler->Panic && !NoMoreToken(Assembler) && ConsumeIfNextTokenIs(Assembler, TOKEN_BAR))
     {
-        INT_ONLY(Left, |, ExprXor(Assembler), "Cannot perform '|' on floating-point number.");
+        INT_ONLY(Left, |, ExprXor(Assembler));
     }
     return Left;
 }
@@ -1462,9 +1547,9 @@ static Value StrictConstExpr(M68kAssembler *Assembler)
 static uint32_t StrictIntExpr(M68kAssembler *Assembler, const char *ExprName)
 {
     Value Expr = StrictConstExpr(Assembler);
-    if (Expr.IsFloat)
+    if (Expr.Type != VAL_INT)
     {
-        ErrorAtLastExpr(Assembler, "%s cannot be a floating-point number.", ExprName);
+        ErrorAtLastExpr(Assembler, "%s must be an integer.", ExprName);
     }
     return Expr.As.Int;
 }
@@ -1473,9 +1558,9 @@ static uint32_t IntExpr(M68kAssembler *Assembler, const char *ExprName, UndefTyp
 {
     unsigned PrevUndefSymCount = Assembler->UndefSymCount;
     Value Expr = ConstExpr(Assembler);
-    if (Expr.IsFloat)
+    if (Expr.Type != VAL_INT)
     {
-        ErrorAtLastExpr(Assembler, "%s cannot be a floating-point number.", ExprName);
+        ErrorAtLastExpr(Assembler, "%s must be an integer.", ExprName);
     }
 
     if (PrevUndefSymCount != Assembler->UndefSymCount)
@@ -1489,6 +1574,7 @@ static uint32_t IntExpr(M68kAssembler *Assembler, const char *ExprName, UndefTyp
     }
     return Expr.As.Int;
 }
+
 
 
 static void PushSymbol(M68kAssembler *Assembler, const Token *Sym, Value Val)
@@ -1513,16 +1599,14 @@ static void PushSymbol(M68kAssembler *Assembler, const Token *Sym, Value Val)
 
     Assembler->IdenCount++;
     Assembler->Idens[n] = Sym->Lexeme;
-    if (Val.IsFloat)
-    {
-        Assembler->IsFloat[n/32] |= 1ul << (n % 32);
-        Assembler->IdenData[n].Flt = Val.As.Flt;
-    }
-    else 
-    {
-        Assembler->IdenData[n].Int = Val.As.Int;
-    }
     Assembler->IdenLine[n] = Sym->Line;
+    SetIdenType(Assembler, n, Val.Type);
+    switch (Val.Type)
+    {
+    case VAL_FLT: Assembler->IdenData[n].Flt = Val.As.Flt; break;
+    case VAL_INT: Assembler->IdenData[n].Int = Val.As.Int; break;
+    case VAL_STR: Assembler->IdenData[n].Str = Val.As.Str; break;
+    }
 }
 
 
@@ -1538,7 +1622,7 @@ static void DeclStmt(M68kAssembler *Assembler)
     else if (ConsumeIfNextTokenIs(Assembler, TOKEN_COLON))
     {
         Value Val = {
-            .IsFloat = false, 
+            .Type = VAL_INT, 
             .As.Int = Assembler->MachineCode.Size + Assembler->Org,
         };
         PushSymbol(Assembler, &Identifier, Val);
@@ -1672,7 +1756,6 @@ static Argument ConsumeMemoryIndirect(M68kAssembler *Assembler, uint32_t InsLoca
         }
     );
 }
-
 
 
 /* '(' is the current token */
@@ -2089,33 +2172,134 @@ static uint32_t LittleEndianRead(uint8_t *Buffer, unsigned Size)
     return Data;
 }
 
+static bool ResizeBufferCapacity(M68kAssembler *Assembler, size_t NewSize)
+{
+    if (NewSize <= Assembler->MachineCode.Capacity)
+        return true;
+
+    Assembler->MachineCode.Capacity = (Assembler->MachineCode.Capacity + NewSize)*2;
+    void *Tmp = Assembler->Allocator(Assembler->MachineCode.Buffer, Assembler->MachineCode.Capacity);
+
+    if (NULL == Tmp)
+    {
+        /* free the buffer */
+        Assembler->Allocator(Assembler->MachineCode.Buffer, 0);
+        Assembler->MachineCode.Buffer = NULL;
+        Assembler->MachineCode.Size = 0;
+        Assembler->MachineCode.Capacity = 0;
+
+        Assembler->CriticalError = true;
+        EmptyError(Assembler, "Allocator failed.");
+        return false;
+    }
+    Assembler->MachineCode.Buffer = Tmp;
+    return true;
+}
+
+
 static void Emit(M68kAssembler *Assembler, uint64_t Data, unsigned Size)
 {
-    if (Assembler->CriticalError)
-        return;
-
-    if (Assembler->MachineCode.Size + Size >= Assembler->MachineCode.Capacity)
+    if (Assembler->CriticalError 
+    || !ResizeBufferCapacity(Assembler, Assembler->MachineCode.Size + Size))
     {
-        Assembler->MachineCode.Capacity = (Assembler->MachineCode.Capacity + Size)*2;
-        Assembler->MachineCode.Buffer = 
-            Assembler->Allocator(Assembler->MachineCode.Buffer, Assembler->MachineCode.Capacity);
-        if (NULL == Assembler->MachineCode.Buffer)
-        {
-            Assembler->CriticalError = true;
-            EmptyError(Assembler, "Allocator failed.");
-            return;
-        }
+        return;
     }
 
     Assembler->Emit(&Assembler->MachineCode.Buffer[Assembler->MachineCode.Size], Data, Size);
     Assembler->MachineCode.Size += Size;
 }
 
+static void EmitFloat(M68kAssembler *Assembler, double Flt, unsigned Size)
+{
+    if (Assembler->CriticalError 
+    || !ResizeBufferCapacity(Assembler, Assembler->MachineCode.Size + Size))
+    {
+        return;
+    }
+
+    union {
+        double d;
+        uint64_t u;
+    } As64;
+    union {
+        float f;
+        uint32_t u;
+    } As32;
+    /* M68k's floating point has the same endian as integers */
+    if (4 == Size)
+    {
+        As32.f = Flt;
+        Assembler->Emit(Assembler->MachineCode.Buffer, As32.u, 4);
+    }
+    else
+    {
+        As64.d = Flt;
+        Assembler->Emit(Assembler->MachineCode.Buffer, As64.u, 8);
+    }
+}
+
+static void EmitString(M68kAssembler *Assembler, StringView Str)
+{
+    if (Assembler->CriticalError 
+    || !ResizeBufferCapacity(Assembler, Assembler->MachineCode.Size + Str.Len))
+    {
+        return;
+    }
+
+    uint8_t *Buffer = Assembler->MachineCode.Buffer + Assembler->MachineCode.Size;
+    size_t i = 0, Emitted = 0;
+    while (i < Str.Len)
+    {
+        if (Str.Ptr[i] == '\\' && i + 1 < Str.Len)
+        {
+            char Char = 0;
+            i += 2;
+            switch (Str.Ptr[i - 1])
+            {
+            default: goto ContinueLoop; break;
+            case '\r': /* might be a windows \r\n sequence */
+            {
+                int IsWindowsNewline = (i < Str.Len && Str.Ptr[i] == '\n');
+                i += IsWindowsNewline;
+                goto ContinueLoop;
+            } break;
+            case 'n': Char = '\n'; break;
+            case 'r': Char = '\r'; break;
+            case 't': Char = '\t'; break;
+            case '0': Char = '\0'; break;
+            case '\\': Char = '\\'; break;
+            case '\'': Char = '\''; break;
+            case 'x': 
+            {
+                while (i < Str.Len 
+                && (IsNumber(Str.Ptr[i]) || IN_RANGE('A', TO_UPPER(Str.Ptr[i]), 'F')))
+                {
+                    Char *= 16;
+                    if (IN_RANGE('A', TO_UPPER(Str.Ptr[i]), 'F'))
+                        Char += TO_UPPER(Str.Ptr[i]) - 'A' + 10;
+                    else
+                        Char += Str.Ptr[i] - '0';
+                    i++;
+                }
+            } break;
+            }
+
+            Buffer[Emitted++] = Char;
+        }
+        else
+        {
+            Buffer[Emitted++] = Str.Ptr[i++];
+        }
+ContinueLoop: ;
+    }
+    Assembler->MachineCode.Size += Emitted;
+}
+
 static void EmitEaExtension(M68kAssembler *Assembler, EaEncoding Encoding)
 {
     if (Encoding.HasImmediate)
     {
-        Emit(Assembler, Encoding.u.Immediate, IN_I16((int32_t)Encoding.u.Immediate) ? 2 : 4);
+        Emit(Assembler, Encoding.u.Immediate, IN_I16(Encoding.u.Immediate)? 2: 4);
     }
 
     if (Encoding.Extension == NO_EXTENSION)
@@ -2159,7 +2343,7 @@ static void AssertSize(M68kAssembler *Assembler, const Token *Instruction, unsig
 
     if (Size != ConsumeSize(Assembler))
     {
-        ErrorAtToken(Assembler, Instruction, STRVIEW_FMT" expecteds '%s' size specifier.", 
+        ErrorAtToken(Assembler, Instruction, STRVIEW_FMT" expects '%s' size specifier.", 
             STRVIEW_FMT_ARG(Instruction->Lexeme), SizeSpec
         );
     }
@@ -2171,9 +2355,9 @@ static void IgnoreSize(M68kAssembler *Assembler, const Token *Instruction)
     {
         ConsumeSizeSpecifier(Assembler);
         WarnAtToken(Assembler, 
-                Instruction, ""STRVIEW_FMT" ignores '"STRVIEW_FMT"' size specifier.", 
-                STRVIEW_FMT_ARG(Instruction->Lexeme),
-                STRVIEW_FMT_ARG(Assembler->CurrentToken.Lexeme)
+            Instruction, ""STRVIEW_FMT" ignores '"STRVIEW_FMT"' size specifier.", 
+            STRVIEW_FMT_ARG(Instruction->Lexeme),
+            STRVIEW_FMT_ARG(Assembler->CurrentToken.Lexeme)
         );
     }
 }
@@ -2204,6 +2388,32 @@ static uint16_t ConsumeRegisterList(M68kAssembler *Assembler, bool PreDec)
     } while (ConsumeIfNextTokenIs(Assembler, TOKEN_COMMA));
     ConsumeOrError(Assembler, TOKEN_RCURLY, "Expected '}' after register list.");
     return List;
+}
+
+static void DefineConstant(M68kAssembler *Assembler, unsigned Size)
+{
+    do {
+        Value Val = ConstExpr(Assembler);
+        switch (Val.Type)
+        {
+        case VAL_FLT:
+        {
+            if (1 == Size || 2 == Size)
+                ErrorAtLastExpr(Assembler, "Must use 'dq' or 'dl' directive for floating-point numbers.");
+            EmitFloat(Assembler, Val.As.Flt, Size);
+        } break;
+        case VAL_STR:
+        {
+            if (1 != Size)
+                ErrorAtLastExpr(Assembler, "Must use 'db' directive for strings.");
+            EmitString(Assembler, Val.As.Str);
+        } break;
+        case VAL_INT:
+        {
+            Emit(Assembler, Val.As.Int, Size);
+        } break;
+        }
+    } while (ConsumeIfNextTokenIs(Assembler, TOKEN_COMMA));
 }
 
 static void ConsumeStatement(M68kAssembler *Assembler)
@@ -2274,14 +2484,31 @@ static void ConsumeStatement(M68kAssembler *Assembler)
     switch (Type)
     {
     case TOKEN_EOF: break;
-    default:
+    default: Error(Assembler, "Expected instruction, variable, label, or directive."); break;
+    case TOKEN_ORG: Assembler->Org = StrictIntExpr(Assembler, "argument"); break;
+    case TOKEN_DB: DefineConstant(Assembler, 1); break;
+    case TOKEN_DW: DefineConstant(Assembler, 2); break;
+    case TOKEN_DL: DefineConstant(Assembler, 4); break;
+    case TOKEN_DQ: DefineConstant(Assembler, 8); break;
+    case TOKEN_ALIGN:
     {
-        Error(Assembler, "Expected instruction, variable, label, or directive.");
+        unsigned Alignment = StrictIntExpr(Assembler, "alignement");
+        if (CountBits(Alignment) != 1)
+        {
+            ErrorAtLastExpr(Assembler, "Alignment must be a power of 2.");
+        }
+
+        uint32_t OldSize = Assembler->MachineCode.Size;
+        size_t NewSize = (Assembler->MachineCode.Size + Alignment) & ~(Alignment - 1);
+        if (!ResizeBufferCapacity(Assembler, NewSize))
+            return;
+
+        for (unsigned i = OldSize; i < NewSize; i++)
+            Assembler->MachineCode.Buffer[i] = 0;
     } break;
-    case TOKEN_IDENTIFIER:
-    {
-        DeclStmt(Assembler);
-    } break;
+    case TOKEN_IDENTIFIER: DeclStmt(Assembler); break;
+
+
     case TOKEN_ADDI:
     case TOKEN_ANDI:
     case TOKEN_CMPI:
@@ -3018,7 +3245,6 @@ static void ConsumeStatement(M68kAssembler *Assembler)
     case TOKEN_LEA:
     {
         AssertSize(Assembler, &Instruction, 4);
-        IgnoreSize(Assembler, &Instruction);
         Argument Addr = ConsumeEa(Assembler, 2, 4);
         CONSUME_COMMA();
         unsigned An = ConsumeAddrReg(Assembler);
@@ -3380,7 +3606,7 @@ static void ResolveUndefExpr(M68kAssembler *Assembler)
         } break;
         case UNDEF_OUTER_DISPLACEMENT:
         {
-            /* dodge the outer displacement */
+            /* dodge the base displacement */
             uint32_t ExtensionWord = Assembler->Read(Buffer + Location, 2);
             if (0 == (ExtensionWord & 0x0080)) /* base not suppressed */
             {

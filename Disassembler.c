@@ -454,8 +454,8 @@ void MC68020Disassemble(const uint8_t *Buffer, size_t BufferSize,
                     }
                     else
                     {
-                        Operand = DisasmModeReg(&Dis, Mode, Reg, Size);
                         Immediate = CheckAndRead(&Dis, uMax(DisasmDecodeSize(Size), 2));
+                        Operand = DisasmModeReg(&Dis, Mode, Reg, Size);
                     }
                     const char *Mnemonic = "???";
                     switch ((Opcode >> 9) & 0x7)
