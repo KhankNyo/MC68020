@@ -300,15 +300,17 @@ typedef struct Token
 
 typedef enum UndefType 
 {
-    UNDEF_IMM8,
-    UNDEF_IMM16,
-    UNDEF_IMM32,
+    UNDEF_IMM8 = 0x00000010,
+    UNDEF_BRANCH_BYTE,
+
+    UNDEF_IMM16 = 0x00001000,
+    UNDEF_BRANCH_WORD,
+
+    UNDEF_IMM32 = 0x10000000,
     UNDEF_DISPLACEMENT,
     UNDEF_PCREL_DISPLACEMENT,
     UNDEF_OUTER_DISPLACEMENT,
     UNDEF_BRANCH_LONG,
-    UNDEF_BRANCH_BYTE,
-    UNDEF_BRANCH_WORD,
 } UndefType;
 
 typedef struct M68kAssembler
@@ -1298,7 +1300,7 @@ static uint16_t ConsumeRegisterList(M68kAssembler *Assembler)
 
     uint16_t List = 0;
     do {
-        unsigned Reg;
+        unsigned Reg = 0;
         if (ConsumeIfNextTokenIs(Assembler, TOKEN_ADDR_REG))
         {
             Reg = Assembler->CurrentToken.Data.Int + 8;
@@ -1645,7 +1647,7 @@ static uint32_t IntExpr(M68kAssembler *Assembler, const char *ExprName, UndefTyp
         Assembler->Undef[UndefCount].Type = Type;
         Assembler->Undef[UndefCount].PC = Location + Assembler->Org;
         Assembler->Undef[UndefCount].Location = Location;
-        return 0x80000000;
+        return Type;
     }
     return Expr.As.Int;
 }
@@ -2724,7 +2726,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
 
         Emit(Assembler, 
             SizeEncoding
-            | (DstEa.RegMode << 6)
+            | ((uint32_t)DstEa.RegMode << 6)
             | (SrcEa.ModeReg),
             2
         );

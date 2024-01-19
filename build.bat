@@ -1,8 +1,8 @@
 @echo off
 
 
-set "CC=tcc"
-set "CCFLAGS=-Og -g -Oz -Wall -Wextra -Wpedantic -Wno-missing-braces -IInclude"
+set "CC=gcc"
+set "CCFLAGS=-O0 -ggdb -Wall -Wextra -Wpedantic -Wno-missing-braces -IInclude"
 set "LDFLAGS= "
 set "LIBS= "
 
@@ -10,6 +10,17 @@ if "clean"=="%1" (
     if exist bin\ rmdir /q /s bin
     echo ---------------------------
     echo   removed build artifacts
+    echo ---------------------------
+) else if "cl"=="%1" (
+    if "%VisualStudioVersion%"=="" call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+
+    if not exist bin\ mkdir bin
+    pushd bin
+    cl /DEBUG /Zi /I"Include"  main.exe ..\build.c
+    popd 
+
+    echo ---------------------------
+    echo       build finished
     echo ---------------------------
 ) else (
     if not exist bin\ mkdir bin

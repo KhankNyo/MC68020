@@ -6,7 +6,7 @@
 #include <stddef.h>
 
 #define MASK(Value, Size) \
-    ((Value) & ((1ull << (Size)) - 1))
+    ((Value) & ((1ull << (Size)*8) - 1))
 #define SEX(To, From) (int##To##_t)(int##From##_t)
 #define STATIC_ARRAY_SIZE(Array) (sizeof(Array) / sizeof((Array)[0]))
 

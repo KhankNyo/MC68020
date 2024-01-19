@@ -1,11 +1,11 @@
 
 #include "Common.h"
-#include "MC68020.h"
+#include "Emulator.h"
 #include "MC68020Isa.h"
 #include "Disassembler.h"
 #include "Assembler.h"
 
-#include "MC68020.c"
+#include "Emulator.c"
 #include "Assembler.c"
 #include "Disassembler.c"
 #include "main.c"
