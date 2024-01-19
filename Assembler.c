@@ -561,8 +561,8 @@ static unsigned GetConditionalCodeFromMnemonic(char UpperSecond, char UpperThird
     unsigned ConditionalCode = INVALID_CONDITIONAL_CODE;
     switch (UpperSecond)
     {
-    case 'T': ConditionalCode = 1; break;
-    case 'F': ConditionalCode = 2; break;
+    case 'T': ConditionalCode = 0; break;
+    case 'F': ConditionalCode = 1; break;
     case 'H':
     {
         if ('I' == UpperThird)
