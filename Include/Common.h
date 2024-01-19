@@ -86,6 +86,20 @@ static inline uint64_t uMin(uint64_t a, uint64_t b)
 static inline int64_t iMin(int64_t a, int64_t b)
 { return a > b? b: a; }
 
+static inline uint16_t ReverseBits16(uint16_t n)
+{
+    static const uint8_t ReversedVersion[16] = {
+        0x0, 0x8, 0x4, 0xC,
+        0x2, 0xA, 0x6, 0xE,
+        0x1, 0x9, 0x5, 0xD, 
+        0x3, 0xB, 0x7, 0xF
+    };
+    return ((uint16_t)ReversedVersion[n & 0xF] << 12)
+        | ((uint16_t)ReversedVersion[(n >> 4) & 0xF] << 8)
+        | ((uint16_t)ReversedVersion[(n >> 8) & 0xF] << 4) 
+        | ((uint16_t)ReversedVersion[(n >> 12) & 0xF]);
+}
+
 
 #endif /* COMMON_H */
 

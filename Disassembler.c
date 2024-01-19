@@ -25,7 +25,6 @@ static uint32_t DisassemblerBigEndianRead(const uint8_t *Buffer, size_t Size)
 }
 
 
-
 typedef struct DisasmBuffer 
 {
     const uint8_t *Buffer;
@@ -36,9 +35,24 @@ typedef struct DisasmBuffer
 
 typedef struct SmallStr 
 {
-    char Data[64];
+    char Data[128]; /* big enough for a reg list */
 } SmallStr;
+static int SmallStrLen(const SmallStr *s)
+{
+    int l = 0;
+    while (l < (int)sizeof(SmallStr) && s->Data[l])
+    {
+        l++;
+    }
+    return l;
+}
+
+
 #define SmallStrFmt(SmlStr, ...) snprintf((SmlStr).Data, sizeof(SmallStr), __VA_ARGS__)
+#define SmallStrAppend(SmlStr, ...) do {\
+    int l_ = SmallStrLen(&(SmlStr));\
+    snprintf((SmlStr).Data + l_, sizeof(SmallStr) - l_, __VA_ARGS__);\
+} while(0)
 
 static const char sRegisterName[16][4] = {
     "D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", 
@@ -401,6 +415,226 @@ static SmallStr DisasmPreDecOrDn(const char *Mnemonic, uint16_t Opcode)
     return Ret;
 }
 
+static SmallStr DisasmRegMask(uint16_t RegMask, bool Reversed)
+{
+    SmallStr RegList = { 0 };
+    SmallStrAppend(RegList, "{ ");
+    if (Reversed)
+        RegMask = ReverseBits16(RegMask);
+
+    int i = 0;
+    while (i < 16)
+    {
+        unsigned Start = i;
+        /* encountered a set bit */
+        if (RegMask & (1 << i))
+        {
+            /* loop until an unset one is seen */
+            do {
+                i++;
+            } while (i < 16 && (RegMask & (1 << i)));
+
+            /* if we have appended register to the list */
+            if (RegList.Data[2] != '\0')
+                SmallStrAppend(RegList, "/");
+
+            unsigned End = i - 1;
+            if (End - Start > 1)
+                SmallStrAppend(RegList, "%s-%s", sRegisterName[Start], sRegisterName[End]);
+            else
+                SmallStrAppend(RegList, "%s", sRegisterName[Start]);
+        }
+        else
+        {
+            i++;
+        }
+    }
+
+    SmallStrAppend(RegList, " }");
+    return RegList;
+}
+
+static SmallStr DisasmMiscInstructions(DisasmBuffer *Dis, uint16_t Opcode)
+{
+    SmallStr Ret = { "???" };
+    if (Opcode == 0x4AFC) /* ILLEGAL */
+        return (SmallStr){"illegal"};
+
+    unsigned Reg = 0x7 & Opcode,
+             Mode = 0x7 & (Opcode >> 3),
+             Size = 0x3 & (Opcode >> 6),
+             LeftReg = 0x7 & (Opcode >> 9);
+
+    if ((Opcode & 0x0B80) == 0x0880) /* MOVEM, EXT, EXTB */
+    {
+        if (Mode == 0) /* EXT, EXTB*/
+        {
+            const char *Byte = Opcode & 0x0100? "b": "";
+            const char *ExtendTo = Opcode & 0x0040? ".l": ".w";
+            SmallStrFmt(Ret, "ext%s%s %s", Byte, ExtendTo, sRegisterName[Reg]);
+        }
+        else if (Mode != 01)
+        {
+            unsigned DecodedSize = Opcode & 0x0040? 4: 2,
+                     MemToReg = 0 != (Opcode & 0x0400);
+            unsigned RegMask = CheckAndRead(Dis, 2);
+            SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, DecodedSize);
+            SmallStr RegList = DisasmRegMask(RegMask, Mode == 0x4 && !MemToReg);
+
+            if (MemToReg)
+                SmallStrFmt(Ret, "movem %s, %s", RegList.Data, Ea.Data);
+            else SmallStrFmt(Ret, "movem %s, %s", Ea.Data, RegList.Data);
+        }
+        return Ret;
+    }
+
+
+    if ((Opcode & 0x0180) == 0x0180) /* LEA, CHK */
+    {
+        if (Opcode & 0x0040) /* LEA */
+        {
+            SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, 4);
+            SmallStrFmt(Ret, "lea.l %s, %s", Ea.Data, sRegisterName[LeftReg]);
+        }
+        else /* CHK */
+        {
+            const char *Size = Opcode & 0x0080? ".w": ".l";
+            SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, 2);
+            SmallStrFmt(Ret, "chk%s %s, %s", Size, Ea.Data, sRegisterName[LeftReg]);
+        }
+        return Ret;
+    }
+
+
+    switch (Opcode & 0x0F00)
+    {
+    case 0x0000: /* NEGX; MOVE SR, <ea> */
+    {
+        unsigned DecodedSize = 0x3 == Size?
+            4: DisasmDecodeSize(Size);
+        SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, DecodedSize);
+
+        if (0x3 == Size) /* MOVE */
+            SmallStrFmt(Ret, "move SR, %s", Ea.Data);
+        else SmallStrFmt(Ret, "negx%s %s", DisasmRealSize(DecodedSize), Ea.Data);
+    } return Ret;
+    case 0x0200: /* CLR */
+    {
+        if (0x3 != Size)
+        {
+            SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, DisasmDecodeSize(Size));
+            SmallStrFmt(Ret, "clr%s %s", DisasmEncodedSize(Size), Ea.Data);
+        }
+    } return Ret;
+    case 0x0400: /* NEG; MOVE <ea>, CCR */
+    {
+        unsigned DecodedSize = 0x3 == Size?
+            4: DisasmDecodeSize(Size);
+        SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, DecodedSize);
+
+        if (0x3 == Size) /* MOVE */
+            SmallStrFmt(Ret, "move %s, CCR", Ea.Data);
+        else SmallStrFmt(Ret, "neg%s %s", DisasmRealSize(DecodedSize), Ea.Data);
+    } return Ret;
+    case 0x0600: /* NOT; MOVE <ea>, SR */
+    {
+        unsigned DecodedSize = 0x3 == Size?
+            4: DisasmDecodeSize(Size);
+        SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, DecodedSize);
+
+        if (0x3 == Size) /* MOVE */
+            SmallStrFmt(Ret, "move %s, SR", Ea.Data);
+        else SmallStrFmt(Ret, "not%s %s", DisasmRealSize(DecodedSize), Ea.Data);
+    } return Ret;
+    case 0x0800: /* NBCD, PEA, SWAP */
+    {
+        if (0 == (Opcode & 0x00C0)) /* NBCD */
+        {
+            SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, 1);
+            SmallStrFmt(Ret, "nbcd.b %s", Ea.Data);
+        }
+        else if (0x0040 == (Opcode & 0x00F8)) /* SWAP */
+        {
+            SmallStrFmt(Ret, "swap.w %s", sRegisterName[Reg]);
+        }
+        else 
+        {
+            SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, 4);
+            SmallStrFmt(Ret, "pea %s", Ea.Data); 
+        }
+    } return Ret;
+    case 0x0A00: /* TEST, TAS, ILLEGAL */
+    {
+        unsigned DecodedSize = 1;
+        const char *Mnemonic = "tas";
+        if (Size != 3) /* tst */
+        {
+            DecodedSize = DisasmDecodeSize(Size);
+            Mnemonic = "tst";
+        }
+
+        SmallStr Operand = DisasmModeReg(Dis, Mode, Reg, DecodedSize);
+        SmallStrFmt(Ret, "%s%s %s", Mnemonic, DisasmRealSize(DecodedSize), Operand.Data);
+    } return Ret;
+
+    default: break;
+    }
+
+    if ((Opcode & 0x0F80) == 0x0E80) /* JMP, JSR */
+    {
+        SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, 4);
+        const char *Mnemonic = Opcode & 0x0080? "jmp": "jsr";
+        SmallStrFmt(Ret, "%s %s", Mnemonic, Ea.Data);
+        return Ret;
+    }
+
+    if ((Opcode & 0x0FC0) == 0x0E40) /* misc */
+    {
+        switch ((Opcode >> 4) & 0x3)
+        {
+        case 0: /* TRAP */
+        {
+            unsigned Vector = Opcode & 0xF;
+            SmallStrFmt(Ret, "trap #%u", Vector);
+        } break;
+        case 1: /* LINK, UNLK */
+        {
+            const char *AddrReg = sRegisterName[Reg + 8];
+            if (Opcode & 0x8) /* UNLK */
+            {
+                SmallStrFmt(Ret, "unlk %s", AddrReg);
+            }
+            else /* LINK */
+            {
+                int32_t Displacement = SEX(32, 16)CheckAndRead(Dis, 2);
+                SmallStrFmt(Ret, "link %s, #%d", AddrReg, Displacement);
+            }
+        } break;
+        case 2: /* MOVE USP */
+        {
+            const char *AddrReg = sRegisterName[Reg + 8];
+            const char *Fmt = Opcode & 0x8?
+                "move usp, %s"
+                : "move %s, usp";
+            SmallStrFmt(Ret, Fmt, AddrReg);
+        } break;
+        case 3: /* no operand */
+        {
+            static const char OpLut[8][8] = {
+                "reset", "nop", "stop", "rte", 
+                "???", "rts", "trapv", "rtr", 
+            };
+
+            if (2 == Reg) /* STOP #imm */
+                SmallStrFmt(Ret, "stop #%u", CheckAndRead(Dis, 2));
+            else SmallStrFmt(Ret, "%s", OpLut[Reg]);
+        } break;
+        }
+        return Ret;
+    }
+    return Ret;
+}
+
 void MC68020Disassemble(const uint8_t *Buffer, size_t BufferSize,
         FILE *f, uint32_t VirtualStartAddr, bool LittleEndian)
 {
@@ -511,6 +745,7 @@ void MC68020Disassemble(const uint8_t *Buffer, size_t BufferSize,
         case 3: Instruction = DisasmMove(&Dis, Opcode, sizeof(uint16_t)); break;
         case 4:
         {
+            Instruction = DisasmMiscInstructions(&Dis, Opcode);
         } break;
         case 5:
         {

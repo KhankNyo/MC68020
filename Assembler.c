@@ -190,15 +190,19 @@ typedef enum ValueType
     VAL_INT = 0,
     VAL_FLT,
     VAL_STR,
+    VAL_REGLIST,
 } ValueType;
+typedef union ValueAs 
+{
+    double Flt;
+    uint64_t Int;
+    StringView Str;
+    uint16_t RegList;
+} ValueAs;
 typedef struct Value 
 {
     ValueType Type;
-    union {
-        double Flt;
-        uint64_t Int;
-        StringView Str;
-    } As;
+    ValueAs As;
 } Value;
 
 
@@ -327,11 +331,7 @@ typedef struct M68kAssembler
     uint32_t IdenType[1024/16];
     StringView Idens[1048];
     int IdenLine[1048];
-    union {
-        uint64_t Int;
-        double Flt;
-        StringView Str;
-    } IdenData[1048];
+    ValueAs IdenData[1048];
 
     Expression CurrentExpr;
 
@@ -1276,6 +1276,7 @@ static bool Find(M68kAssembler *Assembler, StringView Identifier, Value *Out)
             case VAL_INT: Out->As.Int = Assembler->IdenData[i].Int; break;
             case VAL_FLT: Out->As.Flt = Assembler->IdenData[i].Flt; break;
             case VAL_STR: Out->As.Str = Assembler->IdenData[i].Str; break;
+            case VAL_REGLIST: Out->As.RegList = Assembler->IdenData[i].RegList; break;
             }
             return true;
         }
@@ -1286,6 +1287,62 @@ static bool Find(M68kAssembler *Assembler, StringView Identifier, Value *Out)
 
 
 static Value ConstExpr(M68kAssembler *Assembler);
+
+
+static uint16_t ConsumeRegisterList(M68kAssembler *Assembler)
+{
+    /* example syntax: 
+     *      D0-D3/D5/D6/A0 
+     *      D0-D6/A4-A5
+     * */
+
+    uint16_t List = 0;
+    do {
+        unsigned Reg;
+        if (ConsumeIfNextTokenIs(Assembler, TOKEN_ADDR_REG))
+        {
+            Reg = Assembler->CurrentToken.Data.Int + 8;
+        }
+        else if (ConsumeOrError(Assembler, TOKEN_DATA_REG, "Expected data or address register."))
+        {
+            Reg = Assembler->CurrentToken.Data.Int;
+        }
+
+        TokenType ListHeadType = Assembler->CurrentToken.Type;
+        if (ConsumeIfNextTokenIs(Assembler, TOKEN_MINUS))
+        {
+            uint32_t Range = 0;
+            ConsumeOrError(Assembler, ListHeadType, 
+                "Expected %s register.", TOKEN_DATA_REG == ListHeadType? "data": "address"
+            );
+            unsigned Reg2 = Assembler->CurrentToken.Data.Int;
+            if (ListHeadType == TOKEN_ADDR_REG)
+                Reg2 += 8;
+
+            if (Reg2 <= Reg)
+                Error(Assembler, "Expected second register to be greater than first.");
+
+            /* 
+             * find lower bound from Reg2
+             * find upper bound from Reg
+             * bitwise and those two to get the range
+             *
+             * ex: D3-D6: expected:         = 0b0111 1000
+             * Range = (1 << (7)) - 1       = 0b0111 1111
+             * Tmp   = ~((1 << (3)) - 1)    = 0b1111 1000
+             * Final = Range & Tmp          = 0b0111 1000
+             */
+            Range = (1 << (Reg2 + 1)) - 1;
+            Range &= ~((1 << (Reg)) - 1); 
+            List |= Range;
+        }
+        else
+        {
+            List |= 1 << Reg;
+        }
+    } while (ConsumeIfNextTokenIs(Assembler, TOKEN_SLASH));
+    return List;
+}
 
 static Value Factor(M68kAssembler *Assembler)
 {
@@ -1320,6 +1377,7 @@ static Value Factor(M68kAssembler *Assembler)
         {
         case VAL_FLT: Val.As.Flt = -Val.As.Flt; break;
         case VAL_INT: Val.As.Int = -Val.As.Int; break;
+        case VAL_REGLIST: Val.As.RegList = ReverseBits16(Val.As.RegList); break;
         case VAL_STR: Error(Assembler, "Cannot negate a string."); break;
         }
         return Val;
@@ -1327,17 +1385,15 @@ static Value Factor(M68kAssembler *Assembler)
     case TOKEN_PLUS:
     {
         Value Val = Factor(Assembler);
-        if (Val.Type == VAL_STR)
-            Error(Assembler, "'+' is not applicable to strings.");
+        if (Val.Type != VAL_INT && Val.Type != VAL_FLT)
+            Error(Assembler, "'+' is only applicable to integer or floatint-point number.");
         return Val;
     } break;
     case TOKEN_TILDE:
     {
         Value Val = Factor(Assembler);
-        if (Val.Type == VAL_FLT)
-            Error(Assembler, "'~' is not applicable to floating-point number.");
-        if (Val.Type == VAL_STR)
-            Error(Assembler, "'~' is not applicable to strings.");
+        if (Val.Type != VAL_INT)
+            Error(Assembler, "'~' is only applicable to integer.");
         Val.As.Int = ~Val.As.Int;
         return Val;
     } break;
@@ -1521,6 +1577,7 @@ static void TerminateExpr(M68kAssembler *Assembler, Expression *Expr)
     Expr->Str.Len = Assembler->CurrentToken.Lexeme.Ptr + Assembler->CurrentToken.Lexeme.Len - Expr->Str.Ptr;
 }
 
+
 static Value ConstExpr(M68kAssembler *Assembler)
 {
     Expression Expr = {
@@ -1529,7 +1586,17 @@ static Value ConstExpr(M68kAssembler *Assembler)
         .Offset = Assembler->NextToken.Offset,
     };
 
-    Value Val = ExprOr(Assembler);
+    Value Val;
+    if (NextTokenIs(TOKEN_ADDR_REG) || NextTokenIs(TOKEN_DATA_REG))
+    {
+        Val.Type = VAL_REGLIST;
+        Val.As.RegList = ConsumeRegisterList(Assembler);
+    }
+    else
+    {
+        Val = ExprOr(Assembler);
+    }
+
     TerminateExpr(Assembler, &Expr);
     Assembler->CurrentExpr = Expr;
     return Val;
@@ -1542,6 +1609,14 @@ static Value StrictConstExpr(M68kAssembler *Assembler)
     Value Val = ConstExpr(Assembler);
     Assembler->StrictExpr = PrevStrict;
     return Val;
+}
+
+static uint16_t RegListOperand(M68kAssembler *Assembler)
+{
+    Value List = StrictConstExpr(Assembler);
+    if (List.Type != VAL_REGLIST)
+        Error(Assembler, "Expected register list.");
+    return List.As.RegList;
 }
 
 static uint32_t StrictIntExpr(M68kAssembler *Assembler, const char *ExprName)
@@ -1606,6 +1681,7 @@ static void PushSymbol(M68kAssembler *Assembler, const Token *Sym, Value Val)
     case VAL_FLT: Assembler->IdenData[n].Flt = Val.As.Flt; break;
     case VAL_INT: Assembler->IdenData[n].Int = Val.As.Int; break;
     case VAL_STR: Assembler->IdenData[n].Str = Val.As.Str; break;
+    case VAL_REGLIST: Assembler->IdenData[n].RegList = Val.As.RegList; break;
     }
 }
 
@@ -2341,11 +2417,14 @@ static void AssertSize(M68kAssembler *Assembler, const Token *Instruction, unsig
     if (Size == 1)
         SizeSpec = ".b";
 
-    if (Size != ConsumeSize(Assembler))
+    if (ConsumeIfNextTokenIs(Assembler, TOKEN_DOT))
     {
-        ErrorAtToken(Assembler, Instruction, STRVIEW_FMT" expects '%s' size specifier.", 
-            STRVIEW_FMT_ARG(Instruction->Lexeme), SizeSpec
-        );
+        if (Size != ConsumeSizeSpecifier(Assembler))
+        {
+            ErrorAtToken(Assembler, Instruction, STRVIEW_FMT" expects '%s' size specifier.", 
+                STRVIEW_FMT_ARG(Instruction->Lexeme), SizeSpec
+            );
+        }
     }
 }
 
@@ -2362,33 +2441,6 @@ static void IgnoreSize(M68kAssembler *Assembler, const Token *Instruction)
     }
 }
 
-/* index corresponding to register */
-static uint16_t ConsumeRegisterList(M68kAssembler *Assembler, bool PreDec)
-{
-    uint16_t List = 0;
-    ConsumeOrError(Assembler, TOKEN_LCURLY, "Expected '{' before register list.");
-    do {
-        unsigned Index = 0;
-        if (ConsumeIfNextTokenIs(Assembler, TOKEN_ADDR_REG))
-        {
-            Index = Assembler->CurrentToken.Data.Int + 8;
-        }
-        else if (ConsumeIfNextTokenIs(Assembler, TOKEN_DATA_REG))
-        {
-            Index = Assembler->CurrentToken.Data.Int;
-        }
-        else
-        {
-            Error(Assembler, "Expected address or data register.");
-        }
-
-        List |= PreDec? 
-            1 << (15 - Index)
-            : 1 << Index;
-    } while (ConsumeIfNextTokenIs(Assembler, TOKEN_COMMA));
-    ConsumeOrError(Assembler, TOKEN_RCURLY, "Expected '}' after register list.");
-    return List;
-}
 
 static void DefineConstant(M68kAssembler *Assembler, unsigned Size)
 {
@@ -2411,6 +2463,14 @@ static void DefineConstant(M68kAssembler *Assembler, unsigned Size)
         case VAL_INT:
         {
             Emit(Assembler, Val.As.Int, Size);
+        } break;
+        case VAL_REGLIST:
+        {
+            if (Size != 2)
+            {
+                Error(Assembler, "Must use 'dw' directive for register list.");
+            }
+            Emit(Assembler, Val.As.RegList, 2);
         } break;
         }
     } while (ConsumeIfNextTokenIs(Assembler, TOKEN_COMMA));
@@ -2761,14 +2821,15 @@ static void ConsumeStatement(M68kAssembler *Assembler)
 
         uint16_t Opcode, List;
         EaEncoding Ea;
-        if (NextTokenIs(TOKEN_LCURLY)) /* mem to reg, postinc */
+        if (ConsumeIfNextTokenIs(Assembler, TOKEN_LCURLY)) /* mem to reg, postinc */
         {
-            List = ConsumeRegisterList(Assembler, false);
+            List = RegListOperand(Assembler);
+            ConsumeOrError(Assembler, TOKEN_RCURLY, "Expected '}' after register list.");
             CONSUME_COMMA();
             Argument Dst = ConsumeEa(Assembler, 4, Size);
+
             Ea = EncodeEa(Dst, Size);
             Opcode = 0x4C80;
-
             if (ARG_DATA_REG == Dst.Type || ARG_ADDR_REG == Dst.Type 
             || ARG_IND_PREDEC == Dst.Type || ARG_IMMEDIATE == Dst.Type
             || AddrmUsePC(Dst))
@@ -2781,9 +2842,13 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             Argument Src = ConsumeEa(Assembler, 4, Size);
             Ea = EncodeEa(Src, Size);
             CONSUME_COMMA();
-            List = ConsumeRegisterList(Assembler, Src.Type == ARG_IND_PREDEC);
-            Opcode = 0x4880;
+            ConsumeOrError(Assembler, TOKEN_LCURLY, "Expected '{'.");
+            List = RegListOperand(Assembler);
+            if (Src.Type == ARG_IND_PREDEC)
+                List = ReverseBits16(List);
+            ConsumeOrError(Assembler, TOKEN_RCURLY, "Expected '}'.");
 
+            Opcode = 0x4880;
             if (ARG_DATA_REG == Src.Type || ARG_ADDR_REG == Src.Type 
             || ARG_IND_POSTINC == Src.Type || ARG_IMMEDIATE == Src.Type)
             {
@@ -3519,6 +3584,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         );
         Emit(Assembler, Offset, 2);
     } break;
+    case TOKEN_ILLEGAL:
     case TOKEN_RESET:
     case TOKEN_NOP:
     case TOKEN_STOP:
@@ -3543,6 +3609,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
     case TOKEN_TRAP:
     {
         IgnoreSize(Assembler, &Instruction);
+        ConsumeOrError(Assembler, TOKEN_POUND, "Expected '#'.");
         unsigned Vector = StrictIntExpr(Assembler, "Trap vector");
         Emit(Assembler, 0x4E40 | Vector, 2);
     } break;
