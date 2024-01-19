@@ -825,7 +825,7 @@ static Token ConsumeIdentifier(M68kAssembler *Assembler, char FirstLetter)
     if ('B' == UpperFirst && IN_RANGE(2, Len, 3))
     {
         unsigned ConditionalCode = GetConditionalCodeFromMnemonic(UpperSecond, UpperThird);
-        if (INVALID_CONDITIONAL_CODE != ConditionalCode)
+        if (INVALID_CONDITIONAL_CODE != ConditionalCode && 1 != ConditionalCode && 2 != ConditionalCode)
         {
             return MakeTokenWith(TOKEN_Bcc, 
                 .ConditionalCode = ConditionalCode

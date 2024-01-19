@@ -19,3 +19,4 @@ start:
     slt d1
     sgt d1
     sle d1
+
