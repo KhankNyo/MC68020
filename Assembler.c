@@ -3619,9 +3619,8 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         NO_BYTE_SIZE(Size);
         unsigned An = ConsumeAddrReg(Assembler);
         CONSUME_COMMA();
-        uint32_t ImmLocation = Assembler->MachineCode.Size + 2;
-        uint32_t Immediate = 
-            ConsumeImmediate(Assembler, ImmLocation, 4 == Size? UNDEF_IMM32: UNDEF_IMM16);
+        /* no pound sign */
+        uint32_t Immediate = StrictIntExpr(Assembler, "Stack offset");
 
         uint16_t Opcode = 4 == Size? 0x4808: 0x4E50;
         Emit(Assembler, Opcode | An, 2);

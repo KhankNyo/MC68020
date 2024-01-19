@@ -1,6 +1,7 @@
 
 mem = $55AA
 off = 10
+long_size = 4
 start:
     negx.l d4
     clr.l (mem)
@@ -19,5 +20,12 @@ start:
 
     jsr longfunc
     jmp start
+
+align 4
 longfunc:
+    link A5, -long_size*8 
+    ; adda #long_size*8, SP
+    unlk A5
+    rts
 self: jmp self
+
