@@ -248,7 +248,10 @@ typedef struct Argument
     Expression Expr;
     union {
         uint32_t An, Dn;
-        int32_t Addr, Immediate;
+        struct {
+            int32_t Value;
+            uint32_t Size;
+        } Addr, Immediate;
         struct {
             uint32_t An;
         } PreDec, PostInc;
@@ -1841,6 +1844,15 @@ static Argument ConsumeMemoryIndirect(M68kAssembler *Assembler, uint32_t InsLoca
     );
 }
 
+static unsigned UintSize(uint32_t Uint)
+{
+    if (Uint <= 0xFF)
+        return 1;
+    if (Uint <= 0xFFFF)
+        return 2;
+    return 4;
+}
+
 
 /* '(' is the current token */
 static Argument IndirectAddressingMode(M68kAssembler *Assembler, uint32_t InsLocation)
@@ -1928,8 +1940,22 @@ NoOuterDisplacement:
         int32_t Displacement = IntExpr(Assembler, "Displacement", UNDEF_DISPLACEMENT, InsLocation);
         if (ConsumeIfNextTokenIs(Assembler, TOKEN_RPAREN)) /* (Expr) */
         {
+            unsigned Size = UintSize(Displacement); /* absolute addr, use uint */
+            if (ConsumeIfNextTokenIs(Assembler, TOKEN_DOT)) /* (Expr).size */
+            {
+                Size = ConsumeSizeSpecifier(Assembler);
+                if (1 == Size)
+                    Error(Assembler, "Absolute address cannot have size of byte.");
+            }
+
+            /* change patch type to the correct size and type */
+            /* UNDEF_DISPLACEMENT is only used for Index addr mode */
+            if (PrevUndefCount != Assembler->UndefCount) 
+                Assembler->Undef[Assembler->UndefCount - 1].Type = Size <= 2? UNDEF_IMM16: UNDEF_IMM32;
+
             return ARGUMENT(ARG_ADDR,
-                .As.Addr = Displacement
+                .As.Addr.Value = Displacement,
+                .As.Addr.Size = Size
             );
         } 
 
@@ -1939,7 +1965,7 @@ NoOuterDisplacement:
         if (ConsumeIfNextTokenIs(Assembler, TOKEN_PC)) /* (Expr, PC ...) */
         {
             Displacement -= InsLocation;
-            if (PrevUndefCount != Assembler->UndefCount) /* change undef type from DISPLACEMENT to PCREL_DISPLACEMENT */
+            if (PrevUndefCount != Assembler->UndefCount) /* change patch type to PC */
                 Assembler->Undef[Assembler->UndefCount - 1].Type = UNDEF_PCREL_DISPLACEMENT;
         }
         else /* (Expr, An ...) */
@@ -1951,6 +1977,7 @@ NoOuterDisplacement:
         {
             XnReg Xn = ConsumeIndexRegister(Assembler);
             ConsumeOrError(Assembler, TOKEN_RPAREN, "Expected ')' after index.");
+            /* TODO: move immediate sizing to another function? */
             if (IN_I8(Displacement)) /* (I8, An, Xn) */
             {
                 return ARGUMENT(ARG_IDX_I8,
@@ -2007,8 +2034,10 @@ static Argument ConsumeEa(M68kAssembler *Assembler, unsigned InstructionSize, un
     if (ConsumeIfNextTokenIs(Assembler, TOKEN_POUND))
     {
         UndefType Type = OperandSize == 4? UNDEF_IMM32: UNDEF_IMM16;
+        int32_t Immediate = IntExpr(Assembler, "Immediate", Type, Location + InstructionSize);
         Arg = ARGUMENT(ARG_IMMEDIATE,
-            .As.Immediate = IntExpr(Assembler, "Immediate", Type, Location + InstructionSize) 
+            .As.Immediate.Value = Immediate,
+            .As.Immediate.Size = OperandSize,
         );
     }
     else if (ConsumeIfNextTokenIs(Assembler, TOKEN_ADDR_REG))
@@ -2038,8 +2067,11 @@ static Argument ConsumeEa(M68kAssembler *Assembler, unsigned InstructionSize, un
     }
     else
     {
+        /* put parentheses around the abs addr if you want to control its size */
+        uint32_t Addr = IntExpr(Assembler, "Address", UNDEF_IMM32, Location + InstructionSize);
         Arg = ARGUMENT(ARG_ADDR,
-            .As.Addr = IntExpr(Assembler, "Address", UNDEF_IMM32, Location + InstructionSize)
+            .As.Addr.Value = Addr,
+            .As.Addr.Size = UintSize(Addr),
         );
     }
 
@@ -2077,7 +2109,7 @@ static unsigned EncodeExtensionSize(uint32_t Displacement)
     return 3;
 }
 
-static EaEncoding EncodeEa(Argument Arg, unsigned OperandSize)
+static EaEncoding EncodeEa(Argument Arg)
 {
 #define ENCODE_FULL_EXTENSION(Xn, WL, SCALE, BS, IS, BD_SIZE, I)\
     ( ((uint32_t)((Xn)        & 0xF) << 12)\
@@ -2193,17 +2225,17 @@ static EaEncoding EncodeEa(Argument Arg, unsigned OperandSize)
 
     case ARG_ADDR:          
     {
-        Encoding.Size = IN_I16(Arg.As.Addr)? 2 : 4;
-        Encoding.ModeReg = 070 + (Encoding.Size == 4);
         Encoding.HasImmediate = true;
-        Encoding.u.Immediate = Arg.As.Addr;
+        Encoding.Size = Arg.As.Addr.Size;
+        Encoding.u.Immediate = Arg.As.Addr.Value;
+        Encoding.ModeReg = 070 + (Encoding.Size == 4);
     } break;
     case ARG_IMMEDIATE:
     {
-        Encoding.Size = OperandSize == 1? 2 : OperandSize;
         Encoding.ModeReg = 074;
         Encoding.HasImmediate = true;
-        Encoding.u.Immediate = Arg.As.Immediate;
+        Encoding.u.Immediate = Arg.As.Immediate.Value;
+        Encoding.Size = Arg.As.Immediate.Size;
     } break;
     case ARG_INVALID: break;
     }
@@ -2642,7 +2674,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             ErrorInvalidAddrMode(Assembler, &Instruction, Dst, "destination");
         }
 
-        EaEncoding Ea = EncodeEa(Dst, Size);
+        EaEncoding Ea = EncodeEa(Dst);
         Emit(Assembler, LOOKUP_OPC(Type)  /* opcode */
             | (ENCODE_SIZE(Size) << 6)    /* size */
             | Ea.ModeReg,                 /* ea */
@@ -2672,7 +2704,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             );
         }
 
-        EaEncoding Ea = EncodeEa(Dst, Size);
+        EaEncoding Ea = EncodeEa(Dst);
         Immediate &= 0x7;
         Emit(Assembler, 
             0x5000
@@ -2699,7 +2731,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         Argument Src = ConsumeEa(Assembler, 2, Size);
         CONSUME_COMMA();
         Argument Dst = ConsumeEa(Assembler, Src.Type == ARG_IMMEDIATE? 4: 2, Size);
-        EaEncoding DstEa = EncodeEa(Dst, Size);
+        EaEncoding DstEa = EncodeEa(Dst);
 
         if (4 == Size && Dst.Type != ARG_DATA_REG)
         {
@@ -2731,7 +2763,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
                 | DstEa.ModeReg, 
                 2
             );
-            Emit(Assembler, 0xFF & Src.As.Immediate, 2);
+            Emit(Assembler, 0xFF & Src.As.Immediate.Value, 2);
             EmitEaExtension(Assembler, DstEa);
         }
         else if (Src.Type == ARG_DATA_REG)
@@ -2754,10 +2786,10 @@ static void ConsumeStatement(M68kAssembler *Assembler)
     {
         unsigned Size = ConsumeSize(Assembler);
         Argument Src = ConsumeEa(Assembler, 2, Size);
-        EaEncoding SrcEa = EncodeEa(Src, Size);
+        EaEncoding SrcEa = EncodeEa(Src);
         CONSUME_COMMA();
         Argument Dst = ConsumeEa(Assembler, 2 + SrcEa.Size, Size);
-        EaEncoding DstEa = EncodeEa(Dst, Size);
+        EaEncoding DstEa = EncodeEa(Dst);
 
         if (Dst.Type == ARG_ADDR_REG || AddrmUsePC(Dst) || ARG_IMMEDIATE == Dst.Type)
         {
@@ -2785,7 +2817,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         unsigned Dst = ConsumeAddrReg(Assembler);
 
         uint32_t SizeEncoding = ENCODE_MOVE_SIZE(Size);
-        EaEncoding Ea = EncodeEa(Src, Size);
+        EaEncoding Ea = EncodeEa(Src);
 
         Emit(Assembler,
             SizeEncoding
@@ -2871,7 +2903,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             CONSUME_COMMA();
             Argument Dst = ConsumeEa(Assembler, 4, Size);
 
-            Ea = EncodeEa(Dst, Size);
+            Ea = EncodeEa(Dst);
             Opcode = 0x4C80;
             if (ARG_DATA_REG == Dst.Type || ARG_ADDR_REG == Dst.Type 
             || ARG_IND_PREDEC == Dst.Type || ARG_IMMEDIATE == Dst.Type
@@ -2883,7 +2915,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         else /* reg to mem predec */
         {
             Argument Src = ConsumeEa(Assembler, 4, Size);
-            Ea = EncodeEa(Src, Size);
+            Ea = EncodeEa(Src);
             CONSUME_COMMA();
             ConsumeOrError(Assembler, TOKEN_LCURLY, "Expected '{'.");
             List = RegListOperand(Assembler);
@@ -2928,7 +2960,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
                 ErrorInvalidAddrMode(Assembler, &Instruction, Src, "source");
             }
 
-            Ea = EncodeEa(Src, Size);
+            Ea = EncodeEa(Src);
             Emit(Assembler,
                 LOOKUP_OPC(Type) | 0x0000
                 | ((uint32_t)Dst.As.Dn << 9)
@@ -2945,7 +2977,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
                 ErrorInvalidAddrMode(Assembler, &Instruction, Dst, "destination");
             }
 
-            Ea = EncodeEa(Dst, Size);
+            Ea = EncodeEa(Dst);
             Emit(Assembler, 
                 LOOKUP_OPC(Type) | 0x0100 /* direction bit */
                 | ((uint32_t)Src.As.Dn << 9)
@@ -2976,7 +3008,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         {
             unsigned IsDiv = TOKEN_MULS != Type && TOKEN_MULU != Type;
             Src = ConsumeEa(Assembler, 4, Size);
-            EaEncoding Ea = EncodeEa(Src, Size);
+            EaEncoding Ea = EncodeEa(Src);
             CONSUME_COMMA();
             unsigned Da = ConsumeDataReg(Assembler);
 
@@ -3021,7 +3053,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
                 );
             }
             Src = ConsumeEa(Assembler, 2, Size);
-            EaEncoding Ea = EncodeEa(Src, Size);
+            EaEncoding Ea = EncodeEa(Src);
             CONSUME_COMMA(); 
             unsigned Dn = ConsumeDataReg(Assembler);
 
@@ -3048,7 +3080,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         {
             ErrorInvalidAddrMode(Assembler, &Instruction, Dst, "destination");
         }
-        EaEncoding Ea = EncodeEa(Dst, Size);
+        EaEncoding Ea = EncodeEa(Dst);
         Emit(Assembler, 
             0xB100
             | (Src << 9)
@@ -3067,7 +3099,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         CONSUME_COMMA();
         unsigned Dst = ConsumeAddrReg(Assembler);
 
-        EaEncoding Ea = EncodeEa(Src, Size);
+        EaEncoding Ea = EncodeEa(Src);
         Emit(Assembler,
             LOOKUP_OPC(Type)
             | (Dst << 9)
@@ -3133,7 +3165,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             ErrorInvalidAddrMode(Assembler, &Instruction, Arg, "argument");
         }
 
-        EaEncoding Ea = EncodeEa(Arg, Size);
+        EaEncoding Ea = EncodeEa(Arg);
         Emit(Assembler, 
             LOOKUP_OPC(Type) 
             | (ENCODE_SIZE(Size) << 6)
@@ -3153,7 +3185,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             ErrorInvalidAddrMode(Assembler, &Instruction, Arg, "argument");
         }
 
-        EaEncoding Ea = EncodeEa(Arg, 1);
+        EaEncoding Ea = EncodeEa(Arg);
         Emit(Assembler, 
             0x4AC0
             | Ea.ModeReg, 
@@ -3165,7 +3197,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
     {
         unsigned Size = ConsumeSize(Assembler);
         Argument Arg = ConsumeEa(Assembler, 2, Size);
-        EaEncoding Ea = EncodeEa(Arg, Size);
+        EaEncoding Ea = EncodeEa(Arg);
         if (ARG_ADDR_REG == Arg.Type)
         {
             NO_BYTE_SIZE(Size);
@@ -3191,7 +3223,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             ErrorInvalidAddrMode(Assembler, &Instruction, Bound, "first argument");
         }
 
-        EaEncoding Ea = EncodeEa(Bound, Size);
+        EaEncoding Ea = EncodeEa(Bound);
         Emit(Assembler, 
             0x4100
             | (Dn << 9) 
@@ -3222,7 +3254,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             Reg = Rn.As.An;
         else ErrorInvalidAddrMode(Assembler, &Instruction, Rn, "second argument");
 
-        EaEncoding Ea = EncodeEa(Bound, Size);
+        EaEncoding Ea = EncodeEa(Bound);
         Emit(Assembler, 
             ((ENCODE_SIZE(Size) << 9)
             | (Ea.ModeReg))
@@ -3266,7 +3298,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         CONSUME_COMMA();
         unsigned Dst = ConsumeDataReg(Assembler);
 
-        EaEncoding Ea = EncodeEa(Src, Size);
+        EaEncoding Ea = EncodeEa(Src);
         Emit(Assembler, 
             0xB000
             | (Dst << 9)
@@ -3284,7 +3316,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         CONSUME_COMMA();
         unsigned Dst = ConsumeAddrReg(Assembler);
 
-        EaEncoding Ea = EncodeEa(Src, Size);
+        EaEncoding Ea = EncodeEa(Src);
         Emit(Assembler, 
             0xB0C0
             | (Dst << 9)
@@ -3378,7 +3410,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             ErrorInvalidAddrMode(Assembler, &Instruction, Addr, "effective address");
         }
 
-        EaEncoding Ea = EncodeEa(Addr, 0); /* lea doesn't have imm encoding, this is ok */
+        EaEncoding Ea = EncodeEa(Addr); /* lea doesn't have imm encoding, this is ok */
         Emit(Assembler, 
             0x41C0 
             | (An << 9)
@@ -3401,7 +3433,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             ErrorInvalidAddrMode(Assembler, &Instruction, Addr, "effective address");
         }
 
-        EaEncoding Ea = EncodeEa(Addr, 4);
+        EaEncoding Ea = EncodeEa(Addr);
         Emit(Assembler, 
             LOOKUP_OPC(Type)
             | Ea.ModeReg, 
@@ -3426,7 +3458,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         {
             ErrorInvalidAddrMode(Assembler, &Instruction, Arg, "argument");
         }
-        EaEncoding Ea = EncodeEa(Arg, 1);
+        EaEncoding Ea = EncodeEa(Arg);
         Emit(Assembler, 
             0x50C0
             | ((uint32_t)Instruction.Data.Int << 8)
@@ -3470,7 +3502,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         }
         else if (ARG_IMMEDIATE == First.Type) /* shift reg by imm */
         {
-            unsigned ShiftCount = First.As.Immediate;
+            unsigned ShiftCount = First.As.Immediate.Value;
             if (!IN_RANGE(1, ShiftCount, 8))
             {
                 ErrorAtLastExpr(Assembler, "Shift count must be in range of 1 to 8.");
@@ -3501,7 +3533,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
                     STRVIEW_FMT_ARG(Instruction.Lexeme)
                 );
             }
-            EaEncoding Ea = EncodeEa(First, 2);
+            EaEncoding Ea = EncodeEa(First);
             Emit(Assembler, 
                 0xE0C0
                 | (LOOKUP_OPC(Type) << 9)
@@ -3520,7 +3552,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         {
             ErrorInvalidAddrMode(Assembler, &Instruction, Arg, "argument");
         }
-        EaEncoding Ea = EncodeEa(Arg, 1);
+        EaEncoding Ea = EncodeEa(Arg);
         Emit(Assembler, 
             0x4800 | Ea.ModeReg, 
             2

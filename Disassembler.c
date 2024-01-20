@@ -754,7 +754,7 @@ SmallStr DisassembleSingleInstruction(DisasmBuffer *Dis, uint16_t Opcode, uint32
             if (Data == 0)
                 Data = 8;
             SmallStr Arg = DisasmModeReg(Dis, Mode, Reg, DisasmDecodeSize(Size));
-            SmallStrFmt(Instruction, "%s%s %s, %u", Mnemonic, DisasmEncodedSize(Size), Arg.Data, Data);
+            SmallStrFmt(Instruction, "%s%s %u, %s", Mnemonic, DisasmEncodedSize(Size), Data, Arg.Data);
         }
     } break;
     case 6: /* BSR, Bcc, BRA */
@@ -989,8 +989,8 @@ SmallStr DisassembleSingleInstruction(DisasmBuffer *Dis, uint16_t Opcode, uint32
     return Instruction;
 }
 
-SmallStr MC68020DisassembleSingleInstruction(const void *Buffer, size_t BufferSizeBytes, 
-    uint32_t VirtualAddr, bool LittleEndian)
+uint32_t MC68020DisassembleSingleInstruction(const void *Buffer, size_t BufferSizeBytes, 
+    uint32_t VirtualAddr, bool LittleEndian, SmallStr *Out)
 {
     DisasmBuffer Dis = {
         .Buffer = Buffer,
@@ -1000,9 +1000,14 @@ SmallStr MC68020DisassembleSingleInstruction(const void *Buffer, size_t BufferSi
     };
     sReadFn = LittleEndian? DisassemblerLittleEndianRead: DisassemblerBigEndianRead;
     if (BufferSizeBytes < 1)
-        return (SmallStr){"----"};
-
-    return DisassembleSingleInstruction(&Dis, CheckAndRead(&Dis, 2), 0);
+    {
+        *Out = (SmallStr){"----"};
+    }
+    else
+    {
+        *Out = DisassembleSingleInstruction(&Dis, CheckAndRead(&Dis, 2), 0);
+    }
+    return Dis.i; /* next instruction's addr */
 }
 
 
@@ -1024,7 +1029,6 @@ void MC68020Disassemble(const void *Buffer, size_t BufferSizeBytes,
         uint16_t Opcode = CheckAndRead(&Dis, 2);
 
         SmallStr Instruction = DisassembleSingleInstruction(&Dis, Opcode, OpcodeAddr);
-
         PrintBytesAndMnemonic(OutStream, &Dis, OpcodeAddr, 4, Instruction.Data);
     }
 }

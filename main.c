@@ -49,13 +49,49 @@ static int GetInput(void)
     return Input;
 }
 
+
+static void UpdateDebugPC(const void *Memory, size_t MemSize, 
+    uint32_t PC, bool LittleEndian)
+{
+#define INS_BUF_SIZE 8
+    static SmallStr InstructionBuffer[INS_BUF_SIZE] = { 0 };
+    static uint32_t InstructionAddr[INS_BUF_SIZE] = { 0 };
+    bool PCOutOfRange = !IN_RANGE(InstructionAddr[0], PC, InstructionAddr[7]);
+    if (PC == 0 || PCOutOfRange)
+    {
+        /* update all of the instruction in the buffer */
+        const uint8_t *At = Memory;
+        uint32_t InsAddr = PC;
+        for (unsigned i = 0; i < STATIC_ARRAY_SIZE(InstructionBuffer); i++)
+        {
+            int64_t SizeLeft = (int64_t)MemSize - (int64_t)PC;
+            if (SizeLeft < 1)
+            {
+                InstructionBuffer[i] = (SmallStr) { "---" };
+            }
+            else
+            {
+                InstructionAddr[i] = InsAddr;
+                InsAddr += MC68020DisassembleSingleInstruction(
+                    At + InsAddr, SizeLeft, 
+                    InsAddr, LittleEndian, &InstructionBuffer[i]
+                );
+            }
+        }
+    }
+
+    /* print the instruction buffer */
+    for (unsigned i = 0; i < STATIC_ARRAY_SIZE(InstructionBuffer); i++)
+    {
+        const char *Pointer = PC == InstructionAddr[i]? " > ": "   ";
+        printf("%8x:%s%s\n", InstructionAddr[i], Pointer, InstructionBuffer[i].Data);
+    }
+#undef INS_BUF_SIZE
+}
+
 static void DumpState(const MC68020 *M68k)
 {
-    int BufferSize = M68k->MemorySize - M68k->PC;
-    SmallStr Opcode = MC68020DisassembleSingleInstruction(
-        &M68k->Memory[M68k->PC], BufferSize > 1? BufferSize: 0,
-        M68k->PC, false);
-    printf("\nPC: [%08x]: %s", M68k->PC, Opcode.Data);
+    UpdateDebugPC(M68k->Memory, M68k->MemorySize, M68k->PC, false);
 
     /* print flags, upper means active */
     char FlagLut[] = "xnzvc";
@@ -77,7 +113,6 @@ static void DumpState(const MC68020 *M68k)
 
 static void LogData(const char *Mode, const MC68020 *M68k, uint32_t Addr, uint32_t Data, unsigned DataSize)
 {
-    DumpState(M68k);
     printf("\n%s: [%08x]"
             "\n    data: %u"
             "\n    raw:  0x%08x"

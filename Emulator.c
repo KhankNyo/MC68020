@@ -391,6 +391,57 @@ void MC68020Execute(MC68020 *M68k)
     case 1: Move(M68k, Opcode, 1); break;
     case 2: Move(M68k, Opcode, 4); break;
     case 3: Move(M68k, Opcode, 2); break;
+    case 5: /* ADDQ, SUBQ, Scc, DBcc */
+    {
+        unsigned Mode = 07 & (Opcode >> 3),
+                 Reg = 07 & Opcode,
+                 EncodedSize = 03 & (Opcode >> 6);
+
+        if (03 != EncodedSize) /* ADDQ, SUBQ */
+        {
+            unsigned Size = 1 << EncodedSize;
+            int32_t Data = 07 & (Opcode >> 9);
+            DataLocation Location = GetLocation(M68k, Mode, Reg, Size);
+            int32_t Dst = GetDataFromLocation(M68k, Location, Size);
+            uint64_t Result;
+
+            if (Opcode & 0x0100) /* SUBQ */
+                Data = -Data;
+
+            Result = (int64_t)Dst + (int64_t)Data;
+            WriteData(M68k, Location, Result, Size);
+            TestCommonAdditionFlags(M68k, 
+                MASK(Result, Size) == 0, 
+                Result, Dst, Data, Size
+            );
+        }
+        else
+        {
+            unsigned Cond = CondIsTrue(M68k, 0xF & (Opcode >> 8));
+            if (MODE_AN == Mode) /* DBcc */
+            {
+                int32_t PC = M68k->PC; /* addr of DBcc + 2 */
+                int32_t Offset = SEX(32, 16)FetchImmediate(M68k, 2);
+                if (Cond) /* do nothing is cond is true */
+                    break;
+
+                /* subtract low word of register by 1 */
+                int32_t Result = (int16_t)(M68k->R[Reg] & 0xFFFF) - 1;
+                M68k->R[Reg] = (M68k->R[Reg] & 0xFFFF0000) | (Result & 0xFFFF);
+
+                if (-1 != Result)  /* only branch if result is not -1 */
+                {
+                    M68k->PC = PC + Offset;
+                }
+            }
+            else /* Scc */
+            {
+                DataLocation Location = GetLocation(M68k, Mode, Reg, 1);
+                uint32_t Data = Cond? 0xFF: 0x00; /* all one's or all zero's */
+                WriteData(M68k, Location, Data, 1);
+            }
+        }
+    } break;
     case 6: /* BRA, BSR, Bcc */
     {
         int32_t PC = M68k->PC;

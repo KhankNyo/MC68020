@@ -10,8 +10,8 @@ typedef struct SmallStr
 {
     char Data[128];
 } SmallStr;
-SmallStr MC68020DisassembleSingleInstruction(const void *Buffer, size_t BufferSizeBytes, 
-    uint32_t VirtualAddr, bool LittleEndian
+uint32_t MC68020DisassembleSingleInstruction(const void *Buffer, size_t BufferSizeBytes, 
+    uint32_t VirtualAddr, bool LittleEndian, SmallStr *Out
 );
 void MC68020Disassemble(const void *Buffer, size_t BufferSizeBytes, 
     uint32_t VirtualAddr, bool LittleEndian, FILE *OutStream
