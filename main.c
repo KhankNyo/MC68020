@@ -98,7 +98,7 @@ static uint32_t MemRead(MC68020 *M68k, uint32_t Addr, unsigned Size)
 
     for (int i = Size - 1; i >= 0; i--)
         Data |= M68k->Memory[Addr++] << i*8;
-    LogData("Reading", M68k, Addr - Size, Data, Size);
+    //LogData("Reading", M68k, Addr - Size, Data, Size);
     return Data;
 }
 
@@ -109,7 +109,7 @@ static void MemWrite(MC68020 *M68k, uint32_t Addr, uint32_t Data, uint32_t Size)
 
     for (int i = Size - 1; i >= 0; i--)
         M68k->Memory[Addr++] = Data >> i*8;
-    LogData("Writing", M68k, Addr - Size, Data, Size);
+    //LogData("Writing", M68k, Addr - Size, Data, Size);
 }
 
 

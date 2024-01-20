@@ -8,6 +8,7 @@ typedef enum LocationType
 {
     LOC_ADDR,
     LOC_REG,
+    LOC_IMM,
 } LocationType;
 
 typedef struct DataLocation
@@ -16,6 +17,7 @@ typedef struct DataLocation
     union {
         uint32_t EffectiveAddr;
         unsigned RegisterIndex;
+        uint32_t Immediate;
     } As;
 } DataLocation;
 
@@ -215,8 +217,8 @@ static DataLocation GetLocation(MC68020 *M68k, unsigned Mode, unsigned Reg, unsi
         /* imm */
         case 4:
         {
-            Location.As.EffectiveAddr = PC;
-            M68k->PC += Size;
+            Location.Type = LOC_IMM;
+            Location.As.Immediate = FetchImmediate(M68k, 1 == Size? 2: Size);
         } break;
         }
     } break;
@@ -227,7 +229,7 @@ static DataLocation GetLocation(MC68020 *M68k, unsigned Mode, unsigned Reg, unsi
 static uint32_t GetDataFromReg(MC68020 *M68k, unsigned RegisterIndex, unsigned Size)
 {
     RegisterIndex &= 0xF;
-    uint32_t Data = M68k->R[RegisterIndex & 07];
+    uint32_t Data = M68k->R[RegisterIndex];
     if (RegisterIndex >= 8 && Size == 2)
         return SEX(32, 16)Data;
     return MASK(Data, Size);
@@ -244,6 +246,10 @@ static uint32_t GetDataFromLocation(MC68020 *M68k, DataLocation Location, unsign
     case LOC_ADDR: 
     {
         return MASK(M68k->Read(M68k, Location.As.EffectiveAddr, Size), Size);
+    } break;
+    case LOC_IMM:
+    {
+        return MASK(Location.As.Immediate, Size);
     } break;
     }
     return 0;
@@ -268,7 +274,7 @@ static void WriteDataToReg(MC68020 *M68k, unsigned RegisterIndex, uint32_t Data,
     else /* mix old content with new if it's a data reg */
     {
         M68k->R[RegisterIndex] = 
-            (Dst & ~((1 << Size*8) - 1)) | MASK(Data, Size);
+            (Dst & ~((1ull << Size*8) - 1)) | MASK(Data, Size);
     }
 }
 
@@ -284,6 +290,10 @@ static void WriteData(MC68020 *M68k, DataLocation Location, uint32_t Data, unsig
     {
         M68k->Write(M68k, Location.As.EffectiveAddr, Data, Size);
     } break;
+    case LOC_IMM:
+    {
+        /* TODO: illegal instruction */
+    } break;
     }
 }
 
@@ -292,7 +302,7 @@ static void TestCommonDataFlags(MC68020 *M68k, uint32_t Data, unsigned Size)
     SET_FLAG(M68k, FLAG_C, 0);
     SET_FLAG(M68k, FLAG_V, 0);
     SET_FLAG(M68k, FLAG_Z, MASK(Data, Size) == 0);
-    SET_FLAG(M68k, FLAG_N, Data & (1 << (Size*8 - 1))); /* check sign bit */
+    SET_FLAG(M68k, FLAG_N, (Data >> (Size*8 - 1)) & 0x1); /* check sign bit */
 }
 
 static void TestCommonAdditionFlags(MC68020 *M68k, 
@@ -353,7 +363,7 @@ static void Move(MC68020 *M68k, uint16_t Opcode, unsigned Size)
     DataLocation Location = GetLocation(M68k, DstMode, DstReg, Size);
     WriteData(M68k, Location, Data, Size);
 
-    if (01 != (07 & DstMode))
+    if (MODE_AN != (07 & DstMode))
     {
         TestCommonDataFlags(M68k, Data, Size);
     }
@@ -406,6 +416,81 @@ void MC68020Execute(MC68020 *M68k)
         int32_t Immediate = SEX(32, 8)(Opcode);
         unsigned Dn = 07 & (Opcode >> 9);
         M68k->R[Dn] = Immediate;
+        TestCommonDataFlags(M68k, Immediate, 4);
+    } break;
+    case 9: /* SUB, SUBA, SUBX */
+    {
+        unsigned Mode = 07 & (Opcode >> 3),
+                 Reg = 07 & (Opcode & 07),
+                 EncodedSize = 03 & (Opcode >> 6),
+                 LeftReg = 07 & (Opcode >> 9);
+        if (EncodedSize == 03) /* SUBA */
+        {
+            unsigned Size = 
+                Opcode & 0x0100? 
+                4: 2;
+            int32_t Src = GetData(M68k, Mode, Reg, Size);
+            uint32_t *Dst = &M68k->R[LeftReg + 8];
+
+            /* writeback */
+            *Dst = (2 == Size)?
+                SEX(32, 16)*Dst - SEX(32, 16)Src 
+                : (int32_t)*Dst - Src;
+        }
+        else if ((Opcode & 0x0130) == 0x0100) /* SUBX */
+        {
+            unsigned Size = 1 << EncodedSize;
+            if (Opcode & 0x8) /* (-An) mode */
+            {
+                uint32_t B = GetData(M68k, MODE_PREDEC, Reg + 8, Size);
+                DataLocation Dst = GetLocation(M68k, MODE_PREDEC, LeftReg + 8, Size);
+                uint32_t A = GetDataFromLocation(M68k, Dst, Size);
+                /* C is awesome */
+                uint64_t Result = (uint64_t)A - (uint64_t)B - (uint64_t)GET_FLAG(M68k, FLAG_X);
+
+                WriteData(M68k, Dst, Result, Size);
+                TestCommonSubtractionFlags(M68k, 
+                    GET_TRUTHY_FLAG(M68k, FLAG_Z) && 0 == MASK(Result, Size), 
+                    Result, A, B, Size
+                );
+            }
+            else /* Dn mode */
+            {
+                uint32_t A = GetDataFromReg(M68k, LeftReg, Size),
+                         B = GetDataFromReg(M68k, Reg, Size);
+                uint64_t Result = (uint64_t)A - (uint64_t)B - (uint64_t)GET_FLAG(M68k, FLAG_X);
+                WriteDataToReg(M68k, LeftReg, Result, Size);
+                TestCommonSubtractionFlags(M68k, 
+                    0 == MASK(Result, Size),
+                    Result, A, B, Size
+                );
+            }
+        }
+        else /* SUB */
+        {
+            unsigned Size = 1 << EncodedSize;
+            DataLocation SrcLocation = GetLocation(M68k, Mode, Reg, Size);
+            uint32_t Subtrahend, Minuend;
+            uint64_t Result;
+            if (Opcode & 0x0100) /* <ea> -= Reg */
+            {
+                Minuend = GetDataFromLocation(M68k, SrcLocation, Size);
+                Subtrahend = GetDataFromReg(M68k, LeftReg, Size);
+                Result = (uint64_t)Minuend - (uint64_t)Subtrahend;
+                WriteData(M68k, SrcLocation, Result, Size);
+            }
+            else /* Reg -= <ea> */
+            {
+                Minuend = GetDataFromReg(M68k, LeftReg, Size);
+                Subtrahend = GetDataFromLocation(M68k, SrcLocation, Size);
+                Result = (uint64_t)Minuend - (uint64_t)Subtrahend;
+                WriteDataToReg(M68k, LeftReg, Result, Size);
+            }
+            TestCommonSubtractionFlags(M68k, 
+                0 == MASK(Result, Size), 
+                Result, Minuend, Subtrahend, Size
+            );
+        }
     } break;
     case 13: /* ADD, ADDX, ADDA */
     {
@@ -423,7 +508,7 @@ void MC68020Execute(MC68020 *M68k)
 
             /* writeback */
             *Dst = (2 == Size)?
-                SEX(32, 16)*Dst + Src 
+                SEX(32, 16)*Dst + SEX(32, 16)Src 
                 : (int32_t)*Dst + Src;
         }
         else if ((Opcode & 0x0130) == 0x0100) /* ADDX */
@@ -434,7 +519,7 @@ void MC68020Execute(MC68020 *M68k)
                 uint32_t B = GetData(M68k, MODE_PREDEC, Reg + 8, Size);
                 DataLocation Dst = GetLocation(M68k, MODE_PREDEC, LeftReg + 8, Size);
                 uint32_t A = GetDataFromLocation(M68k, Dst, Size);
-                uint64_t Result = A + B + GET_FLAG(M68k, FLAG_X);
+                uint64_t Result = (uint64_t)A + (uint64_t)B + (uint64_t)GET_FLAG(M68k, FLAG_X);
 
                 WriteData(M68k, Dst, Result, Size);
                 TestCommonAdditionFlags(M68k, 
@@ -446,7 +531,7 @@ void MC68020Execute(MC68020 *M68k)
             {
                 uint32_t A = GetDataFromReg(M68k, LeftReg, Size),
                          B = GetDataFromReg(M68k, Reg, Size);
-                uint64_t Result = A + B + GET_FLAG(M68k, FLAG_X);
+                uint64_t Result = (uint64_t)A + (uint64_t)B + (uint64_t)GET_FLAG(M68k, FLAG_X);
                 WriteDataToReg(M68k, LeftReg, Result, Size);
                 TestCommonAdditionFlags(M68k, 
                     0 == MASK(Result, Size),
@@ -460,7 +545,7 @@ void MC68020Execute(MC68020 *M68k)
             DataLocation SrcLocation = GetLocation(M68k, Mode, Reg, Size);
             uint32_t A = GetDataFromLocation(M68k, SrcLocation, Size),
                      B = GetDataFromReg(M68k, LeftReg, Size);
-            uint64_t Result = A + B;
+            uint64_t Result = (uint64_t)A + (uint64_t)B;
 
             /* writeback */
             if (Opcode & 0x0100) /* A + B -> SrcLocation */
