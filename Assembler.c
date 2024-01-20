@@ -3,7 +3,6 @@
 #include "Assembler.h"
 
 #include <stdarg.h>
-#include <stdlib.h>
 
 
 
@@ -48,6 +47,7 @@ typedef enum TokenType
     TOKEN_DW,
     TOKEN_DL,
     TOKEN_DQ,
+    TOKEN_RESV,
 
     /* instructions */
     TOKEN_ABCD,
@@ -766,6 +766,7 @@ static Token ConsumeIdentifier(M68kAssembler *Assembler, char FirstLetter)
             INS(RTM),
             INS(RTR),
             INS(RTS),
+            KEYWORD(RESV),
         },
         ['S'] = {
             INS(SBCD),
@@ -1631,6 +1632,16 @@ static uint32_t StrictIntExpr(M68kAssembler *Assembler, const char *ExprName)
     return Expr.As.Int;
 }
 
+static UndefType PushUndef(M68kAssembler *Assembler, UndefType Type, uint32_t Location)
+{
+    unsigned UndefCount = Assembler->UndefCount++;
+    Assembler->Undef[UndefCount].Expr = Assembler->CurrentExpr;
+    Assembler->Undef[UndefCount].Type = Type;
+    Assembler->Undef[UndefCount].PC = Location + Assembler->Org;
+    Assembler->Undef[UndefCount].Location = Location;
+    return Type;
+}
+
 static uint32_t IntExpr(M68kAssembler *Assembler, const char *ExprName, UndefType Type, uint32_t Location)
 {
     unsigned PrevUndefSymCount = Assembler->UndefSymCount;
@@ -1642,12 +1653,7 @@ static uint32_t IntExpr(M68kAssembler *Assembler, const char *ExprName, UndefTyp
 
     if (PrevUndefSymCount != Assembler->UndefSymCount)
     {
-        unsigned UndefCount = Assembler->UndefCount++;
-        Assembler->Undef[UndefCount].Expr = Assembler->CurrentExpr;
-        Assembler->Undef[UndefCount].Type = Type;
-        Assembler->Undef[UndefCount].PC = Location + Assembler->Org;
-        Assembler->Undef[UndefCount].Location = Location;
-        return Type;
+        return PushUndef(Assembler, Type, Location);
     }
     return Expr.As.Int;
 }
@@ -1933,7 +1939,7 @@ NoOuterDisplacement:
         if (ConsumeIfNextTokenIs(Assembler, TOKEN_PC)) /* (Expr, PC ...) */
         {
             Displacement -= InsLocation;
-            if (PrevUndefCount != Assembler->UndefCount)
+            if (PrevUndefCount != Assembler->UndefCount) /* change undef type from DISPLACEMENT to PCREL_DISPLACEMENT */
                 Assembler->Undef[Assembler->UndefCount - 1].Type = UNDEF_PCREL_DISPLACEMENT;
         }
         else /* (Expr, An ...) */
@@ -2128,7 +2134,6 @@ static EaEncoding EncodeEa(Argument Arg, unsigned OperandSize)
         );
         Encoding.u.BaseDisplacement = Arg.As.Mem.Bd;
         Encoding.OuterDisplacement = Arg.As.Mem.Od;
-        
         Encoding.ModeReg = (Arg.As.Mem.An == REG_PC)
             ? 073
             : 060 + Arg.As.Mem.An;
@@ -2274,6 +2279,17 @@ static bool ResizeBufferCapacity(M68kAssembler *Assembler, size_t NewSize)
     return true;
 }
 
+static bool ResizeBufferBy(M68kAssembler *Assembler, size_t AdditionalSize)
+{
+    if (!ResizeBufferCapacity(Assembler, Assembler->MachineCode.Size + AdditionalSize))
+        return false;
+
+    size_t OldSize = Assembler->MachineCode.Size;
+    Assembler->MachineCode.Size += AdditionalSize;
+    for (size_t i = OldSize; i < OldSize + AdditionalSize; i++)
+        Assembler->MachineCode.Buffer[i] = 0;
+    return true;
+}
 
 static void Emit(M68kAssembler *Assembler, uint64_t Data, unsigned Size)
 {
@@ -2377,7 +2393,7 @@ static void EmitEaExtension(M68kAssembler *Assembler, EaEncoding Encoding)
 {
     if (Encoding.HasImmediate)
     {
-        Emit(Assembler, Encoding.u.Immediate, IN_I16(Encoding.u.Immediate)? 2: 4);
+        Emit(Assembler, Encoding.u.Immediate, Encoding.Size);
     }
 
     if (Encoding.Extension == NO_EXTENSION)
@@ -2446,8 +2462,24 @@ static void IgnoreSize(M68kAssembler *Assembler, const Token *Instruction)
 
 static void DefineConstant(M68kAssembler *Assembler, unsigned Size)
 {
+    UndefType Type;
+    switch (Size)
+    {
+    case 1: Type = UNDEF_IMM8; break;
+    case 2: Type = UNDEF_IMM16; break;
+    default:
+    case 4: Type = UNDEF_IMM32; break;
+    }
     do {
+        unsigned PrevUndefSymCount = Assembler->UndefSymCount;
         Value Val = ConstExpr(Assembler);
+        if (PrevUndefSymCount != Assembler->UndefSymCount)
+        {
+            if (Size == 8)
+                ErrorAtLastExpr(Assembler, "64 bit expression must have all label(s) defined beforehand.");
+            PushUndef(Assembler, Type, Assembler->MachineCode.Size);
+        }
+
         switch (Val.Type)
         {
         case VAL_FLT:
@@ -2559,11 +2591,23 @@ static void ConsumeStatement(M68kAssembler *Assembler)
     {
     case TOKEN_EOF: break;
     default: Error(Assembler, "Expected instruction, variable, label, or directive."); break;
-    case TOKEN_ORG: Assembler->Org = StrictIntExpr(Assembler, "argument"); break;
+    case TOKEN_ORG: 
+    {
+        uint32_t NewOrg = StrictIntExpr(Assembler, "argument"); break;
+        if (NewOrg <= Assembler->Org)
+            Error(Assembler, "New org must be greater than previous org.");
+        else Assembler->Org = NewOrg;
+    } break;
     case TOKEN_DB: DefineConstant(Assembler, 1); break;
     case TOKEN_DW: DefineConstant(Assembler, 2); break;
     case TOKEN_DL: DefineConstant(Assembler, 4); break;
     case TOKEN_DQ: DefineConstant(Assembler, 8); break;
+    case TOKEN_RESV: 
+    {
+        uint32_t AdditionalSize = StrictIntExpr(Assembler, "argument");
+        if (!ResizeBufferBy(Assembler, AdditionalSize))
+            return;
+    } break;
     case TOKEN_ALIGN:
     {
         unsigned Alignment = StrictIntExpr(Assembler, "alignement");
@@ -2574,11 +2618,8 @@ static void ConsumeStatement(M68kAssembler *Assembler)
 
         uint32_t OldSize = Assembler->MachineCode.Size;
         size_t NewSize = (Assembler->MachineCode.Size + Alignment) & ~(Alignment - 1);
-        if (!ResizeBufferCapacity(Assembler, NewSize))
+        if (!ResizeBufferBy(Assembler, NewSize - OldSize))
             return;
-
-        for (unsigned i = OldSize; i < NewSize; i++)
-            Assembler->MachineCode.Buffer[i] = 0;
     } break;
     case TOKEN_IDENTIFIER: DeclStmt(Assembler); break;
 
@@ -3639,6 +3680,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
     {
         Unpanic(Assembler);
     }
+#undef ENCODE_MOVE_SIZE
 #undef LOOKUP_OPC
 #undef CONSUME_COMMA
 }
@@ -3657,7 +3699,7 @@ static void ResolveUndefExpr(M68kAssembler *Assembler)
         ConsumeToken(Assembler);
 
         uint32_t Location = Assembler->Undef[i].Location;
-        uint32_t Value = StrictIntExpr(Assembler, "second pass");
+        uint32_t Value = StrictIntExpr(Assembler, "Second pass");
         if (Assembler->Panic)
         {
             Assembler->Panic = false;
@@ -3678,13 +3720,13 @@ static void ResolveUndefExpr(M68kAssembler *Assembler)
              * assert that BD_SIZE field is 0b11
              * and BS field is 0 */
             uint32_t ExtensionWord = Assembler->Read(Buffer + Location, 2);
-            if ((ExtensionWord & 0x0030) == 0x0030)
-                UNREACHABLE("BD_SIZE field should be 0b11, (long size)");
+            if ((ExtensionWord & 0x0030) != 0x0030)
+                UNREACHABLE("BD_SIZE field should be 0b11, got %d", 03 & (ExtensionWord >> 4));
             if (ExtensionWord & 0x0080)
                 UNREACHABLE("BS field should be 0");
 
             int32_t Displacement = (Assembler->Undef[i].Type == UNDEF_PCREL_DISPLACEMENT) 
-                ? Value - (Assembler->Undef[i].PC + 2)
+                ? Value - (Assembler->Undef[i].PC)
                 : Value;
             Assembler->Emit(Buffer + Location + 2, Displacement, 4);
         } break;
