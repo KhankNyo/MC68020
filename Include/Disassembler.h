@@ -6,8 +6,15 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-void MC68020Disassemble(const uint8_t *Buffer, size_t BufferSize, 
-    FILE *OutStream, uint32_t VirtualStartAddr, bool LittleEndian
+typedef struct SmallStr 
+{
+    char Data[128];
+} SmallStr;
+SmallStr MC68020DisassembleSingleInstruction(const void *Buffer, size_t BufferSizeBytes, 
+    uint32_t VirtualAddr, bool LittleEndian
+);
+void MC68020Disassemble(const void *Buffer, size_t BufferSizeBytes, 
+    uint32_t VirtualAddr, bool LittleEndian, FILE *OutStream
 );
 
 #endif /* MC68020_DISASSEMBLER_H */

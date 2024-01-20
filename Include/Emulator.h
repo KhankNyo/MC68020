@@ -9,7 +9,7 @@ typedef uint32_t (*MC68020ReadFn)(MC68020 *, uint32_t Addr, unsigned Size);
 
 struct MC68020 
 {
-    int32_t R[16];
+    uint32_t R[16];
     uint32_t PC;
     uint16_t SR;
     uint16_t Opcode;

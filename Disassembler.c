@@ -33,10 +33,6 @@ typedef struct DisasmBuffer
     uint32_t i;
 } DisasmBuffer;
 
-typedef struct SmallStr 
-{
-    char Data[128]; /* big enough for a reg list */
-} SmallStr;
 static int SmallStrLen(const SmallStr *s)
 {
     int l = 0;
@@ -65,11 +61,11 @@ static uint32_t (*sReadFn)(const uint8_t *Buffer, size_t Size) = NULL;
 static uint32_t CheckAndRead(DisasmBuffer *Dis, size_t Size)
 {
     Dis->i += Size;
-    if (Dis->i <= Dis->BufferSize)
+    if ((int32_t)Dis->i <= (int32_t)Dis->BufferSize)
     {
         return sReadFn(Dis->Buffer + Dis->i - Size, Size);
     }
-    return 0;
+    return 0x0;
 }
 
 static unsigned DisasmDecodeExtensionSize(unsigned Sz)
@@ -635,378 +631,401 @@ static SmallStr DisasmMiscInstructions(DisasmBuffer *Dis, uint16_t Opcode)
     return Ret;
 }
 
-void MC68020Disassemble(const uint8_t *Buffer, size_t BufferSize,
-        FILE *f, uint32_t VirtualStartAddr, bool LittleEndian)
+SmallStr DisassembleSingleInstruction(DisasmBuffer *Dis, uint16_t Opcode, uint32_t OpcodeAddr)
 {
-    DisasmBuffer Dis = {
-        .i = 0,
-        .Buffer = Buffer, 
-        .BufferSize = BufferSize,
-        .VirtualStartAddr = VirtualStartAddr,
-    };
-    sReadFn = LittleEndian? DisassemblerLittleEndianRead : DisassemblerBigEndianRead;
-
-    while (Dis.i + 1 < BufferSize)
+    SmallStr Instruction = { 0 };
+    switch (Opcode >> 12)
     {
-        uint32_t OpcodeAddr = Dis.i;
-        PrintAddr(f, OpcodeAddr + VirtualStartAddr);
-        uint16_t Opcode = CheckAndRead(&Dis, 2);
+    case 0:
+    {
+        unsigned Mode = 07 & (Opcode >> 3);
+        unsigned Reg = Opcode & 07;
+        if (Opcode & 0x0100) /* bit with register argument */
+        {
+            const char *Mnemonic = "???";
+            unsigned Size = (Mode & 0x7) == 0? 4: 1; /* long if Dn, else byte */
+            unsigned Op = Opcode >> 6;
 
-        SmallStr Instruction = { 0 };
-        switch (Opcode >> 12)
-        {
-        case 0:
-        {
-            unsigned Mode = 07 & (Opcode >> 3);
-            unsigned Reg = Opcode & 07;
-            if (Opcode & 0x0100) /* bit with register argument */
+            switch (Op & 0x3)
             {
-                const char *Mnemonic = "???";
-                unsigned Size = (Mode & 0x7) == 0? 4: 1; /* long if Dn, else byte */
-                unsigned Op = Opcode >> 6;
+            case 0: /* btst */ Mnemonic = "btst"; break;
+            case 1: /* bchg */ Mnemonic = "bchg"; break;
+            case 2: /* bclr */ Mnemonic = "bclr"; break;
+            case 3: /* bset */ Mnemonic = "bset"; break;
+            }
+            if (01 == Mode) /* no An */
+                Mnemonic = "???";
 
-                switch (Op & 0x3)
+            SmallStr Arg = DisasmModeReg(Dis, Mode, Reg, Size);
+            const char *ShiftRegister = sRegisterName[(Opcode >> 9) & 0x7];
+            SmallStrFmt(Instruction, "%s%s %s, %s", Mnemonic, DisasmRealSize(Size), ShiftRegister, Arg.Data);
+        }
+        else
+        {
+            unsigned Op = Opcode >> 9;
+            Op &= 7;
+            if (4 == Op) /* bit immediate */
+            {
+                uint8_t ShiftByte = CheckAndRead(Dis, 2);
+                unsigned Size = (Mode & 0x7) == 0? 4: 1; /* long if Dn, else byte */
+                const char *Mnemonic = "???";
+                unsigned BitOp = Opcode >> 6;
+
+                switch (BitOp & 0x3)
                 {
                 case 0: /* btst */ Mnemonic = "btst"; break;
                 case 1: /* bchg */ Mnemonic = "bchg"; break;
                 case 2: /* bclr */ Mnemonic = "bclr"; break;
                 case 3: /* bset */ Mnemonic = "bset"; break;
                 }
-                if (01 == Mode) /* no An */
+                if (01 == Mode || (07 == Mode && 04 == Reg))
                     Mnemonic = "???";
 
-                SmallStr Arg = DisasmModeReg(&Dis, Mode, Reg, Size);
-                const char *ShiftRegister = sRegisterName[(Opcode >> 9) & 0x7];
-                SmallStrFmt(Instruction, "%s%s %s, %s", Mnemonic, DisasmRealSize(Size), ShiftRegister, Arg.Data);
+                SmallStr Arg = DisasmModeReg(Dis, Mode, Reg, Size);
+                SmallStrFmt(Instruction, "%s%s #%u, %s", Mnemonic, DisasmRealSize(Size), ShiftByte, Arg.Data);
             }
             else
             {
-                unsigned Op = Opcode >> 9;
-                Op &= 7;
-                if (4 == Op) /* bit immediate */
+                unsigned Size = Opcode >> 6;
+                Size &= 0x3;
+
+                Mode &= 07;
+                SmallStr Operand;
+                uint32_t Immediate;
+                if (07 == Mode && 04 == Reg)
                 {
-                    uint8_t ShiftByte = CheckAndRead(&Dis, 2);
-                    unsigned Size = (Mode & 0x7) == 0? 4: 1; /* long if Dn, else byte */
-                    const char *Mnemonic = "???";
-                    unsigned BitOp = Opcode >> 6;
-
-                    switch (BitOp & 0x3)
-                    {
-                    case 0: /* btst */ Mnemonic = "btst"; break;
-                    case 1: /* bchg */ Mnemonic = "bchg"; break;
-                    case 2: /* bclr */ Mnemonic = "bclr"; break;
-                    case 3: /* bset */ Mnemonic = "bset"; break;
-                    }
-                    if (01 == Mode || (07 == Mode && 04 == Reg))
-                        Mnemonic = "???";
-
-                    SmallStr Arg = DisasmModeReg(&Dis, Mode, Reg, Size);
-                    SmallStrFmt(Instruction, "%s%s #%u, %s", Mnemonic, DisasmRealSize(Size), ShiftByte, Arg.Data);
+                    Operand = Size == 0
+                        ? (SmallStr){"CCR"} 
+                        : (SmallStr){"SR"};
+                    Immediate = CheckAndRead(Dis, 2);
                 }
                 else
                 {
-                    unsigned Size = Opcode >> 6;
-                    Size &= 0x3;
-
-                    Mode &= 07;
-                    SmallStr Operand;
-                    uint32_t Immediate;
-                    if (07 == Mode && 04 == Reg)
-                    {
-                        Operand = Size == 0
-                            ? (SmallStr){"CCR"} 
-                            : (SmallStr){"SR"};
-                        Immediate = CheckAndRead(&Dis, 2);
-                    }
-                    else
-                    {
-                        Immediate = CheckAndRead(&Dis, uMax(DisasmDecodeSize(Size), 2));
-                        Operand = DisasmModeReg(&Dis, Mode, Reg, DisasmDecodeSize(Size));
-                    }
-                    const char *Mnemonic = "???";
-                    switch ((Opcode >> 9) & 0x7)
-                    {
-                    case 0: /* ori  */ Mnemonic = "ori"; break;
-                    case 1: /* andi */ Mnemonic = "andi"; break;
-                    case 2: /* subi */ Mnemonic = "subi"; break;
-                    case 3: /* addi */ Mnemonic = "addi"; break;
-                    case 5: /* eori */ Mnemonic = "eori"; break;
-                    case 6: /* cmpi */ Mnemonic = "cmpi"; break;
-                    case 7: /* unkown */ break;
-                    }
-                    SmallStrFmt(Instruction, "%s%s %d, %s", 
-                        Mnemonic, DisasmEncodedSize(Size), Immediate, Operand.Data
-                    );
+                    Immediate = CheckAndRead(Dis, uMax(DisasmDecodeSize(Size), 2));
+                    Operand = DisasmModeReg(Dis, Mode, Reg, DisasmDecodeSize(Size));
                 }
-            }
-        } break;
-        case 1: Instruction = DisasmMove(&Dis, Opcode, sizeof(uint8_t)); break;
-        case 2: Instruction = DisasmMove(&Dis, Opcode, sizeof(uint32_t)); break;
-        case 3: Instruction = DisasmMove(&Dis, Opcode, sizeof(uint16_t)); break;
-        case 4:
-        {
-            Instruction = DisasmMiscInstructions(&Dis, Opcode);
-        } break;
-        case 5:
-        {
-            unsigned Mode = (Opcode >> 3) & 07;
-            unsigned Reg = Opcode & 07;
-            unsigned Size = Opcode >> 6;
-            Size &= 03;
-            if ((Opcode & 0xF0F8) == 0x50C8) /* DBcc */
-            {
-                int32_t BranchOffset = SEX(32, 16)CheckAndRead(&Dis, 2);
-                uint32_t Location = VirtualStartAddr + OpcodeAddr + 2 + BranchOffset;
-                const char *Cond = DisasmConditionalCode(Opcode >> 8);
-                SmallStrFmt(Instruction, "db%s %s, %x", Cond, sRegisterName[Reg], Location);
-            }
-            else if (03 == Size) /* Scc */
-            {
-                const char *Cond = DisasmConditionalCode(Opcode >> 8);
-                SmallStr Arg = DisasmModeReg(&Dis, Mode, Reg, 1);
-                SmallStrFmt(Instruction, "s%s.b %s", Cond, Arg.Data);
-            }
-            else 
-            {
-                const char *Mnemonic = Opcode & 0x0100? "subq" : "addq";
-                unsigned Data = 07 & (Opcode >> 9);
-                if (Data == 0)
-                    Data = 8;
-                SmallStr Arg = DisasmModeReg(&Dis, Mode, Reg, DisasmDecodeSize(Size));
-                SmallStrFmt(Instruction, "%s%s %s, %u", Mnemonic, DisasmEncodedSize(Size), Arg.Data, Data);
-            }
-        } break;
-        case 6: /* BSR, Bcc, BRA */
-        {
-            int32_t Offset = SEX(32, 8)(Opcode & 0xFF);
-            if (0 == Offset)
-                Offset = CheckAndRead(&Dis, 2);
-            else if (-1 == Offset)
-                Offset = CheckAndRead(&Dis, 4);
-            uint32_t Location = OpcodeAddr + 2 + VirtualStartAddr + Offset;
-
-            if ((Opcode & 0x0F00) == 0x0100) /* BSR */
-            {
-                SmallStrFmt(Instruction, "bsr $%x", Location);
-            }
-            else if (0 == (Opcode & 0x0F00)) /* BRA */
-            {
-                SmallStrFmt(Instruction, "bra $%x", Location);
-            }
-            else /* bcc */
-            {
-                const char *ConditionalCode = DisasmConditionalCode(Opcode >> 8);
-                SmallStrFmt(Instruction, "b%s $%x", ConditionalCode, Location);
-            }
-        } break;
-        case 7: /* MOVEQ */
-        {
-            int32_t Immediate = SEX(32, 8)(Opcode & 0xFF);
-            const char *Mnemonic = Opcode & 0x0100?
-                "???" : "moveq";
-            unsigned Dst = (Opcode >> 9) & 07;
-            SmallStrFmt(Instruction, "%s.l %d, %s", Mnemonic, Immediate, sRegisterName[Dst]);
-        } break;
-        case 8:
-        {
-            unsigned LeftReg = (Opcode >> 9) & 07;
-            if ((Opcode & 0xC0) == 0xC0) /* DIVU/S */
-            {
-                unsigned Mode = Opcode >> 3, Reg = Opcode;
-                const char *Mnemonic = Opcode & 0x0100? "divs": "divu";
-                SmallStr Src = DisasmModeReg(&Dis, Mode, Reg, 2);
-                SmallStrFmt(Instruction, "%s.w %s, %s", Mnemonic, Src.Data, sRegisterName[LeftReg]);
-            }
-            else if ((Opcode & 0x01F0) == 0x0100) /* SBCD */
-            {
-                Instruction = DisasmPreDecOrDn("sbcd.b", Opcode);
-            }
-            else /* OR */
-            {
-                unsigned Mode = Opcode >> 3, 
-                         Reg = Opcode, 
-                         Size = 03 & (Opcode >> 6);
-                SmallStr Ea = DisasmModeReg(&Dis, Mode, Reg, DisasmDecodeSize(Size));
-                const char *Dst = sRegisterName[LeftReg];
-                const char *Src = Ea.Data;
-                if (Opcode & 0x0100) /* direction bit: ea | d -> ea */
+                const char *Mnemonic = "???";
+                switch ((Opcode >> 9) & 0x7)
                 {
-                    Dst = Ea.Data;
-                    Src = sRegisterName[LeftReg];
+                case 0: /* ori  */ Mnemonic = "ori"; break;
+                case 1: /* andi */ Mnemonic = "andi"; break;
+                case 2: /* subi */ Mnemonic = "subi"; break;
+                case 3: /* addi */ Mnemonic = "addi"; break;
+                case 5: /* eori */ Mnemonic = "eori"; break;
+                case 6: /* cmpi */ Mnemonic = "cmpi"; break;
+                case 7: /* unkown */ break;
                 }
-
-                SmallStrFmt(Instruction, "or%s %s, %s", DisasmEncodedSize(Size), Src, Dst);
+                SmallStrFmt(Instruction, "%s%s %d, %s", 
+                    Mnemonic, DisasmEncodedSize(Size), Immediate, Operand.Data
+                );
             }
-        } break;
-        case 13: /* ADD, ADDA, ADDX */
-        case 9: /* SUB, SUBA, SUBX */
+        }
+    } break;
+    case 1: Instruction = DisasmMove(Dis, Opcode, sizeof(uint8_t)); break;
+    case 2: Instruction = DisasmMove(Dis, Opcode, sizeof(uint32_t)); break;
+    case 3: Instruction = DisasmMove(Dis, Opcode, sizeof(uint16_t)); break;
+    case 4:
+    {
+        Instruction = DisasmMiscInstructions(Dis, Opcode);
+    } break;
+    case 5:
+    {
+        unsigned Mode = (Opcode >> 3) & 07;
+        unsigned Reg = Opcode & 07;
+        unsigned Size = Opcode >> 6;
+        Size &= 03;
+        if ((Opcode & 0xF0F8) == 0x50C8) /* DBcc */
+        {
+            int32_t BranchOffset = SEX(32, 16)CheckAndRead(Dis, 2);
+            uint32_t Location = Dis->VirtualStartAddr + OpcodeAddr + 2 + BranchOffset;
+            const char *Cond = DisasmConditionalCode(Opcode >> 8);
+            SmallStrFmt(Instruction, "db%s %s, %x", Cond, sRegisterName[Reg], Location);
+        }
+        else if (03 == Size) /* Scc */
+        {
+            const char *Cond = DisasmConditionalCode(Opcode >> 8);
+            SmallStr Arg = DisasmModeReg(Dis, Mode, Reg, 1);
+            SmallStrFmt(Instruction, "s%s.b %s", Cond, Arg.Data);
+        }
+        else 
+        {
+            const char *Mnemonic = Opcode & 0x0100? "subq" : "addq";
+            unsigned Data = 07 & (Opcode >> 9);
+            if (Data == 0)
+                Data = 8;
+            SmallStr Arg = DisasmModeReg(Dis, Mode, Reg, DisasmDecodeSize(Size));
+            SmallStrFmt(Instruction, "%s%s %s, %u", Mnemonic, DisasmEncodedSize(Size), Arg.Data, Data);
+        }
+    } break;
+    case 6: /* BSR, Bcc, BRA */
+    {
+        int32_t Offset = SEX(32, 8)(Opcode & 0xFF);
+        if (0 == Offset)
+            Offset = CheckAndRead(Dis, 2);
+        else if (-1 == Offset)
+            Offset = CheckAndRead(Dis, 4);
+        uint32_t Location = OpcodeAddr + 2 + Dis->VirtualStartAddr + Offset;
+
+        if ((Opcode & 0x0F00) == 0x0100) /* BSR */
+        {
+            SmallStrFmt(Instruction, "bsr $%x", Location);
+        }
+        else if (0 == (Opcode & 0x0F00)) /* BRA */
+        {
+            SmallStrFmt(Instruction, "bra $%x", Location);
+        }
+        else /* bcc */
+        {
+            const char *ConditionalCode = DisasmConditionalCode(Opcode >> 8);
+            SmallStrFmt(Instruction, "b%s $%x", ConditionalCode, Location);
+        }
+    } break;
+    case 7: /* MOVEQ */
+    {
+        int32_t Immediate = SEX(32, 8)(Opcode & 0xFF);
+        const char *Mnemonic = Opcode & 0x0100?
+            "???" : "moveq";
+        unsigned Dst = (Opcode >> 9) & 07;
+        SmallStrFmt(Instruction, "%s.l %d, %s", Mnemonic, Immediate, sRegisterName[Dst]);
+    } break;
+    case 8:
+    {
+        unsigned LeftReg = (Opcode >> 9) & 07;
+        if ((Opcode & 0xC0) == 0xC0) /* DIVU/S */
+        {
+            unsigned Mode = Opcode >> 3, Reg = Opcode;
+            const char *Mnemonic = Opcode & 0x0100? "divs": "divu";
+            SmallStr Src = DisasmModeReg(Dis, Mode, Reg, 2);
+            SmallStrFmt(Instruction, "%s.w %s, %s", Mnemonic, Src.Data, sRegisterName[LeftReg]);
+        }
+        else if ((Opcode & 0x01F0) == 0x0100) /* SBCD */
+        {
+            Instruction = DisasmPreDecOrDn("sbcd.b", Opcode);
+        }
+        else /* OR */
         {
             unsigned Mode = Opcode >> 3, 
-                     Reg = Opcode;
-            unsigned LeftReg = (Opcode >> 9) & 07;
-            unsigned Size = (Opcode >> 6) & 03;
+                     Reg = Opcode, 
+                     Size = 03 & (Opcode >> 6);
+            SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, DisasmDecodeSize(Size));
+            const char *Dst = sRegisterName[LeftReg];
+            const char *Src = Ea.Data;
+            if (Opcode & 0x0100) /* direction bit: ea | d -> ea */
+            {
+                Dst = Ea.Data;
+                Src = sRegisterName[LeftReg];
+            }
 
-            const char *Op = (Opcode >> 12) == 9? "sub": "add";
-            if (03 == Size) /* A */
-            {
-                unsigned Size = Opcode & 0x0100? 4: 1;
-                SmallStr Src = DisasmModeReg(&Dis, Mode, Reg, Size);
-                const char *Dst = sRegisterName[LeftReg + 8];
-                const char SizeChr = Size == 4? 'l': 'w';
-                SmallStrFmt(Instruction, "%sa.%c %s, %s", Op, SizeChr, Src.Data, Dst);
-            }
-            else if ((Opcode & 0x0130) == 0x0100) /* X */
-            {
-                SmallStr Mnemonic;
-                SmallStrFmt(Mnemonic, "%sx%s", Op, DisasmEncodedSize(Size));
-                Instruction = DisasmPreDecOrDn(Mnemonic.Data, Opcode);
-            }
-            else /* normal */
-            {
-                SmallStr Ea = DisasmModeReg(&Dis, Mode, Reg, DisasmDecodeSize(Size));
-                const char *Dst = sRegisterName[LeftReg];
-                const char *Src = Ea.Data;
-                if (Opcode & 0x0100)
-                {
-                    Dst = Ea.Data;
-                    Src = sRegisterName[LeftReg];
-                }
-                SmallStrFmt(Instruction, "%s%s %s, %s", Op, DisasmEncodedSize(Size), Src, Dst);
-            }
-        } break;
-        case 10:
+            SmallStrFmt(Instruction, "or%s %s, %s", DisasmEncodedSize(Size), Src, Dst);
+        }
+    } break;
+    case 13: /* ADD, ADDA, ADDX */
+    case 9: /* SUB, SUBA, SUBX */
+    {
+        unsigned Mode = Opcode >> 3, 
+                 Reg = Opcode;
+        unsigned LeftReg = (Opcode >> 9) & 07;
+        unsigned Size = (Opcode >> 6) & 03;
+
+        const char *Op = (Opcode >> 12) == 9? "sub": "add";
+        if (03 == Size) /* A */
         {
-            SmallStrFmt(Instruction, "???");
-        } break;
-        case 11: /* EOR, CMPM, CMP, CMPA */
+            unsigned Size = Opcode & 0x0100? 4: 1;
+            SmallStr Src = DisasmModeReg(Dis, Mode, Reg, Size);
+            const char *Dst = sRegisterName[LeftReg + 8];
+            const char SizeChr = Size == 4? 'l': 'w';
+            SmallStrFmt(Instruction, "%sa.%c %s, %s", Op, SizeChr, Src.Data, Dst);
+        }
+        else if ((Opcode & 0x0130) == 0x0100) /* X */
         {
-            unsigned Size = 03 & (Opcode >> 6);
-            unsigned LeftReg = 07 & (Opcode >> 9), 
-                     Reg = 07 & Opcode,
-                     Mode = 07 & (Opcode >> 3);
-            if (03 == Size) /* cmpa */
-            {
-                Size = Opcode & 0x0100? 4: 2;
-                SmallStr Src = DisasmModeReg(&Dis, Mode, Reg, Size);
-                SmallStrFmt(Instruction, "cmpa%s %s, %s", DisasmRealSize(Size), Src.Data, sRegisterName[LeftReg + 8]);
-            }
-            else if (Opcode & 0x0100) /* eor, cmpm */
-            {
-                if (01 == Mode) /* cmpm */
-                {
-                    SmallStrFmt(Instruction, "cmpm%s (%s)+, (%s)+", 
-                        DisasmEncodedSize(Size), sRegisterName[Reg + 8], sRegisterName[LeftReg + 8]
-                    );
-                }
-                else /* eor */
-                {
-                    SmallStr Src = DisasmModeReg(&Dis, Mode, Reg, DisasmDecodeSize(Size));
-                    SmallStrFmt(Instruction, "eor%s %s, %s", DisasmEncodedSize(Size), sRegisterName[LeftReg], Src.Data);
-                }
-            }
-            else /* cmp */
-            {
-                SmallStr Src = DisasmModeReg(&Dis, Mode, Reg, DisasmDecodeSize(Size));
-                SmallStrFmt(Instruction, "cmp%s %s, %s", DisasmEncodedSize(Size), Src.Data, sRegisterName[LeftReg]);
-            }
-        } break;
-        case 12: /* MULU/S, ABCD, EXG, AND */
+            SmallStr Mnemonic;
+            SmallStrFmt(Mnemonic, "%sx%s", Op, DisasmEncodedSize(Size));
+            Instruction = DisasmPreDecOrDn(Mnemonic.Data, Opcode);
+        }
+        else /* normal */
         {
-            unsigned LeftReg = (Opcode >> 9) & 07,
-                     Mode = (Opcode >> 3) & 07,
-                     Reg = Opcode & 07,
-                     Size = (Opcode >> 6) & 03;
-            if (03 == Size) /* MUL */
+            SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, DisasmDecodeSize(Size));
+            const char *Dst = sRegisterName[LeftReg];
+            const char *Src = Ea.Data;
+            if (Opcode & 0x0100)
             {
-                const char *Mnemonic = (Opcode & 0x0100)? "muls": "mulu";
-                SmallStr Src = DisasmModeReg(&Dis, Mode, Reg, 2);
-                SmallStrFmt(Instruction, "%s.w %s, %s", Mnemonic, Src.Data, sRegisterName[LeftReg]);
+                Dst = Ea.Data;
+                Src = sRegisterName[LeftReg];
             }
-            else if (Opcode & 0x0100) /* AND Dn, <ea>; ABCD; EXG */
+            SmallStrFmt(Instruction, "%s%s %s, %s", Op, DisasmEncodedSize(Size), Src, Dst);
+        }
+    } break;
+    case 10:
+    {
+        SmallStrFmt(Instruction, "???");
+    } break;
+    case 11: /* EOR, CMPM, CMP, CMPA */
+    {
+        unsigned Size = 03 & (Opcode >> 6);
+        unsigned LeftReg = 07 & (Opcode >> 9), 
+                 Reg = 07 & Opcode,
+                 Mode = 07 & (Opcode >> 3);
+        if (03 == Size) /* cmpa */
+        {
+            Size = Opcode & 0x0100? 4: 2;
+            SmallStr Src = DisasmModeReg(Dis, Mode, Reg, Size);
+            SmallStrFmt(Instruction, "cmpa%s %s, %s", DisasmRealSize(Size), Src.Data, sRegisterName[LeftReg + 8]);
+        }
+        else if (Opcode & 0x0100) /* eor, cmpm */
+        {
+            if (01 == Mode) /* cmpm */
             {
-                if (Mode <= 1) /* ABCD, EXG */
+                SmallStrFmt(Instruction, "cmpm%s (%s)+, (%s)+", 
+                    DisasmEncodedSize(Size), sRegisterName[Reg + 8], sRegisterName[LeftReg + 8]
+                );
+            }
+            else /* eor */
+            {
+                SmallStr Src = DisasmModeReg(Dis, Mode, Reg, DisasmDecodeSize(Size));
+                SmallStrFmt(Instruction, "eor%s %s, %s", DisasmEncodedSize(Size), sRegisterName[LeftReg], Src.Data);
+            }
+        }
+        else /* cmp */
+        {
+            SmallStr Src = DisasmModeReg(Dis, Mode, Reg, DisasmDecodeSize(Size));
+            SmallStrFmt(Instruction, "cmp%s %s, %s", DisasmEncodedSize(Size), Src.Data, sRegisterName[LeftReg]);
+        }
+    } break;
+    case 12: /* MULU/S, ABCD, EXG, AND */
+    {
+        unsigned LeftReg = (Opcode >> 9) & 07,
+                 Mode = (Opcode >> 3) & 07,
+                 Reg = Opcode & 07,
+                 Size = (Opcode >> 6) & 03;
+        if (03 == Size) /* MUL */
+        {
+            const char *Mnemonic = (Opcode & 0x0100)? "muls": "mulu";
+            SmallStr Src = DisasmModeReg(Dis, Mode, Reg, 2);
+            SmallStrFmt(Instruction, "%s.w %s, %s", Mnemonic, Src.Data, sRegisterName[LeftReg]);
+        }
+        else if (Opcode & 0x0100) /* AND Dn, <ea>; ABCD; EXG */
+        {
+            if (Mode <= 1) /* ABCD, EXG */
+            {
+                switch (Size)
                 {
-                    switch (Size)
-                    {
-                    case 0: /* ABCD */
-                    {
-                        Instruction = DisasmPreDecOrDn("abcd.b", Opcode);
-                    } break;
-                    case 1: /* exg Dx, Dy; exg Ax, Ay */
-                    {
-                        const char *Src = Opcode & 0x0008? 
-                            sRegisterName[LeftReg + 8] : sRegisterName[LeftReg];
-                        const char *Dst = Opcode & 0x0008? 
-                            sRegisterName[Reg + 8] : sRegisterName[Reg];
-                        SmallStrFmt(Instruction, "exg.l %s, %s", Src, Dst);
-                    } break;
-                    case 2: /* exg Dx, Ay */
-                    {
-                        SmallStrFmt(Instruction, "exg.l %s, %s", sRegisterName[LeftReg], sRegisterName[Reg + 8]);
-                    } break;
-                    default:
-                    {
-                        Instruction = (SmallStr){ "???" };
-                    } break;
-                    }
-                }
-                else /* AND Dn, <ea> */
+                case 0: /* ABCD */
                 {
-                    SmallStr Ea = DisasmModeReg(&Dis, Mode, Reg, DisasmDecodeSize(Size));
-                    const char *Dst = Ea.Data;
-                    const char *Src = sRegisterName[LeftReg];
-                    SmallStrFmt(Instruction, "and%s %s, %s", DisasmEncodedSize(Size), Src, Dst);
+                    Instruction = DisasmPreDecOrDn("abcd.b", Opcode);
+                } break;
+                case 1: /* exg Dx, Dy; exg Ax, Ay */
+                {
+                    const char *Src = Opcode & 0x0008? 
+                        sRegisterName[LeftReg + 8] : sRegisterName[LeftReg];
+                    const char *Dst = Opcode & 0x0008? 
+                        sRegisterName[Reg + 8] : sRegisterName[Reg];
+                    SmallStrFmt(Instruction, "exg.l %s, %s", Src, Dst);
+                } break;
+                case 2: /* exg Dx, Ay */
+                {
+                    SmallStrFmt(Instruction, "exg.l %s, %s", sRegisterName[LeftReg], sRegisterName[Reg + 8]);
+                } break;
+                default:
+                {
+                    Instruction = (SmallStr){ "???" };
+                } break;
                 }
             }
-            else /* AND <ea>, Dn */
+            else /* AND Dn, <ea> */
             {
-                SmallStr Ea = DisasmModeReg(&Dis, Mode, Reg, DisasmDecodeSize(Size));
-                const char *Dst = sRegisterName[LeftReg];
-                const char *Src = Ea.Data;
+                SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, DisasmDecodeSize(Size));
+                const char *Dst = Ea.Data;
+                const char *Src = sRegisterName[LeftReg];
                 SmallStrFmt(Instruction, "and%s %s, %s", DisasmEncodedSize(Size), Src, Dst);
             }
-        } break;
-        case 14: /* shifts */
-        {
-            unsigned Reg = Opcode & 07,
-                     Size = (Opcode >> 6) & 03,
-                     Shamt = (Opcode >> 9) & 07,
-                     Mode = (Opcode >> 3) & 07;
-            const char Direction = Opcode & 0x0100? 'l': 'r';
-            static const char ShiftOpLut[4][4] = {
-                "as", "ls", "rox", "ro"
-            };
-
-            if (03 == Size) /* shift by 1 only */
-            {
-                SmallStr Operand = DisasmModeReg(&Dis, Mode, Opcode, 1);
-                if (Shamt < 4)
-                    SmallStrFmt(Instruction, "%s%c.w %s", ShiftOpLut[Shamt], Direction, Operand.Data);
-                else
-                    Instruction = (SmallStr) { "???" };
-            }
-            else if (Opcode & 0x0020) /* shift by reg */
-            {
-                SmallStrFmt(Instruction, "%s%c%s %s, %s", 
-                    ShiftOpLut[Mode & 03], Direction, DisasmEncodedSize(Size), 
-                    sRegisterName[Shamt], sRegisterName[Reg]
-                );
-            }
-            else /* shift by imm */
-            {
-                SmallStrFmt(Instruction, "%s%c%s #%u, %s", 
-                    ShiftOpLut[Mode & 03], Direction, DisasmEncodedSize(Size),
-                    Shamt, sRegisterName[Reg]
-                );
-            }
-        } break;
-        default:
-        {
-            SmallStrFmt(Instruction, "???");
-        } break;
         }
+        else /* AND <ea>, Dn */
+        {
+            SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, DisasmDecodeSize(Size));
+            const char *Dst = sRegisterName[LeftReg];
+            const char *Src = Ea.Data;
+            SmallStrFmt(Instruction, "and%s %s, %s", DisasmEncodedSize(Size), Src, Dst);
+        }
+    } break;
+    case 14: /* shifts */
+    {
+        unsigned Reg = Opcode & 07,
+                 Size = (Opcode >> 6) & 03,
+                 Shamt = (Opcode >> 9) & 07,
+                 Mode = (Opcode >> 3) & 07;
+        const char Direction = Opcode & 0x0100? 'l': 'r';
+        static const char ShiftOpLut[4][4] = {
+            "as", "ls", "rox", "ro"
+        };
 
-        PrintBytesAndMnemonic(f, &Dis, OpcodeAddr, 4, Instruction.Data);
+        if (03 == Size) /* shift by 1 only */
+        {
+            SmallStr Operand = DisasmModeReg(Dis, Mode, Opcode, 1);
+            if (Shamt < 4)
+                SmallStrFmt(Instruction, "%s%c.w %s", ShiftOpLut[Shamt], Direction, Operand.Data);
+            else
+                Instruction = (SmallStr) { "???" };
+        }
+        else if (Opcode & 0x0020) /* shift by reg */
+        {
+            SmallStrFmt(Instruction, "%s%c%s %s, %s", 
+                ShiftOpLut[Mode & 03], Direction, DisasmEncodedSize(Size), 
+                sRegisterName[Shamt], sRegisterName[Reg]
+            );
+        }
+        else /* shift by imm */
+        {
+            SmallStrFmt(Instruction, "%s%c%s #%u, %s", 
+                ShiftOpLut[Mode & 03], Direction, DisasmEncodedSize(Size),
+                Shamt, sRegisterName[Reg]
+            );
+        }
+    } break;
+    default:
+    {
+        SmallStrFmt(Instruction, "???");
+    } break;
+    }
+    return Instruction;
+}
+
+SmallStr MC68020DisassembleSingleInstruction(const void *Buffer, size_t BufferSizeBytes, 
+    uint32_t VirtualAddr, bool LittleEndian)
+{
+    DisasmBuffer Dis = {
+        .Buffer = Buffer,
+        .BufferSize = BufferSizeBytes,
+        .VirtualStartAddr = VirtualAddr,
+        .i = 0,
+    };
+    sReadFn = LittleEndian? DisassemblerLittleEndianRead: DisassemblerBigEndianRead;
+    if (BufferSizeBytes < 1)
+        return (SmallStr){"----"};
+
+    return DisassembleSingleInstruction(&Dis, CheckAndRead(&Dis, 2), 0);
+}
+
+
+void MC68020Disassemble(const void *Buffer, size_t BufferSizeBytes,
+    uint32_t VirtualAddr, bool LittleEndian, FILE *OutStream)
+{
+    DisasmBuffer Dis = {
+        .i = 0,
+        .Buffer = Buffer, 
+        .BufferSize = BufferSizeBytes,
+        .VirtualStartAddr = VirtualAddr,
+    };
+    sReadFn = LittleEndian? DisassemblerLittleEndianRead : DisassemblerBigEndianRead;
+
+    while (Dis.i + 1 < BufferSizeBytes)
+    {
+        uint32_t OpcodeAddr = Dis.i;
+        PrintAddr(OutStream, OpcodeAddr + VirtualAddr);
+        uint16_t Opcode = CheckAndRead(&Dis, 2);
+
+        SmallStr Instruction = DisassembleSingleInstruction(&Dis, Opcode, OpcodeAddr);
+
+        PrintBytesAndMnemonic(OutStream, &Dis, OpcodeAddr, 4, Instruction.Data);
     }
 }
 

@@ -24,6 +24,18 @@ typedef enum MC68020EAMode
     EA_SPECIAL,
 } MC68020EAMode;
 
+typedef enum MC68020Mode 
+{
+    MODE_DN = 0,
+    MODE_AN,
+    MODE_IND, 
+    MODE_POSTINC,
+    MODE_PREDEC,
+    MODE_IND_I16,
+    MODE_INDEX,
+    MODE_SPECIAL,
+} MC68020Mode;
+
 typedef enum MC68020Size
 {
     SIZE_BYTE = 0, 
