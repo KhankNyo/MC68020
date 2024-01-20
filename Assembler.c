@@ -591,12 +591,12 @@ static unsigned GetConditionalCodeFromMnemonic(char UpperSecond, char UpperThird
     } break;
     case 'N':
     {
-        if ('E' == UpperThird) /* NE */
+        if ('E' == UpperThird || 'Z' == UpperThird) /* NE, NZ */
             ConditionalCode = 6;
     } break;
     case 'E':
     {
-        if ('Q' == UpperThird) /* EQ */
+        if ('Q' == UpperThird || 'Z' == UpperThird) /* EQ, EZ */
             ConditionalCode = 7;
     } break;
     case 'V':
@@ -831,7 +831,7 @@ static Token ConsumeIdentifier(M68kAssembler *Assembler, char FirstLetter)
     if ('B' == UpperFirst && IN_RANGE(2, Len, 3))
     {
         unsigned ConditionalCode = GetConditionalCodeFromMnemonic(UpperSecond, UpperThird);
-        if (INVALID_CONDITIONAL_CODE != ConditionalCode && 1 != ConditionalCode && 2 != ConditionalCode)
+        if (INVALID_CONDITIONAL_CODE != ConditionalCode && 1 != ConditionalCode && 0 != ConditionalCode)
         {
             return MakeTokenWith(TOKEN_Bcc, 
                 .ConditionalCode = ConditionalCode
@@ -3780,21 +3780,31 @@ static void ResolveUndefExpr(M68kAssembler *Assembler)
         case UNDEF_BRANCH_BYTE:
         {
             int32_t BranchOffset = Value - (Assembler->Undef[i].PC);
-            if (0 == BranchOffset || -1 == BranchOffset)
+            if (0 == BranchOffset || -1 == BranchOffset || !IN_I8(BranchOffset))
             {
+                char SizeSpec = IN_I16(BranchOffset)? 'w' : 'l';
                 ErrorAtExpr(Assembler, &Assembler->Undef[i].Expr, 
-                    "Byte offset is not possible, use '.w' instead."
+                    "Byte offset is not possible, use '.%c' instead.", SizeSpec
                 );
             }
             uint16_t Instruction = Assembler->Read(Buffer + Location - 2, 2) & 0xFF00;
             Assembler->Emit(Buffer + Location - 2, Instruction | (BranchOffset & 0xFF), 2);
         } break;
         case UNDEF_BRANCH_WORD:
+        {
+            int32_t BranchOffset = Value - Assembler->Undef[i].PC;
+            if (!IN_I16(BranchOffset))
+            {
+                ErrorAtExpr(Assembler, &Assembler->Undef[i].Expr, 
+                    "Word offset is not possible, use '.l' instead."
+                );
+            }
+            Assembler->Emit(Buffer + Location, BranchOffset, 2);
+        } break;
         case UNDEF_BRANCH_LONG:
         {
             int32_t BranchOffset = Value - (Assembler->Undef[i].PC);
-            unsigned Size = Assembler->Undef[i].Type == UNDEF_BRANCH_LONG? 4: 2;
-            Assembler->Emit(Buffer + Location, BranchOffset, Size);
+            Assembler->Emit(Buffer + Location, BranchOffset, 4);
         } break;
         }
     }

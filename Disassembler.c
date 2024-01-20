@@ -759,9 +759,9 @@ SmallStr DisassembleSingleInstruction(DisasmBuffer *Dis, uint16_t Opcode, uint32
     } break;
     case 6: /* BSR, Bcc, BRA */
     {
-        int32_t Offset = SEX(32, 8)(Opcode & 0xFF);
+        int32_t Offset = SEX(32, 8)Opcode;
         if (0 == Offset)
-            Offset = CheckAndRead(Dis, 2);
+            Offset = SEX(32, 16)CheckAndRead(Dis, 2);
         else if (-1 == Offset)
             Offset = CheckAndRead(Dis, 4);
         uint32_t Location = OpcodeAddr + 2 + Dis->VirtualStartAddr + Offset;

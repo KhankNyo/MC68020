@@ -497,7 +497,7 @@ void MC68020Execute(MC68020 *M68k)
                 DataLocation Dst = GetLocation(M68k, MODE_PREDEC, LeftReg + 8, Size);
                 uint32_t A = GetDataFromLocation(M68k, Dst, Size);
                 /* C is awesome */
-                uint64_t Result = (uint64_t)A - (uint64_t)B - (uint64_t)GET_FLAG(M68k, FLAG_X);
+                uint64_t Result = (uint64_t)A + -(uint32_t)B + -(uint32_t)GET_FLAG(M68k, FLAG_X);
 
                 WriteData(M68k, Dst, Result, Size);
                 TestCommonSubtractionFlags(M68k, 
@@ -509,7 +509,8 @@ void MC68020Execute(MC68020 *M68k)
             {
                 uint32_t A = GetDataFromReg(M68k, LeftReg, Size),
                          B = GetDataFromReg(M68k, Reg, Size);
-                uint64_t Result = (uint64_t)A - (uint64_t)B - (uint64_t)GET_FLAG(M68k, FLAG_X);
+                /* I wish I was writing zig where carry arithmetic is built-in */
+                uint64_t Result = (uint64_t)A + -(uint32_t)B + -(uint32_t)GET_FLAG(M68k, FLAG_X);
                 WriteDataToReg(M68k, LeftReg, Result, Size);
                 TestCommonSubtractionFlags(M68k, 
                     0 == MASK(Result, Size),
@@ -527,20 +528,74 @@ void MC68020Execute(MC68020 *M68k)
             {
                 Minuend = GetDataFromLocation(M68k, SrcLocation, Size);
                 Subtrahend = GetDataFromReg(M68k, LeftReg, Size);
-                Result = (uint64_t)Minuend - (uint64_t)Subtrahend;
+                Result = (uint64_t)Minuend + (uint64_t)(-(uint32_t)Subtrahend);
                 WriteData(M68k, SrcLocation, Result, Size);
             }
             else /* Reg -= <ea> */
             {
                 Minuend = GetDataFromReg(M68k, LeftReg, Size);
                 Subtrahend = GetDataFromLocation(M68k, SrcLocation, Size);
-                Result = (uint64_t)Minuend - (uint64_t)Subtrahend;
+                Result = (uint64_t)Minuend + (uint64_t)(-(uint32_t)Subtrahend);
                 WriteDataToReg(M68k, LeftReg, Result, Size);
             }
             TestCommonSubtractionFlags(M68k, 
                 0 == MASK(Result, Size), 
                 Result, Minuend, Subtrahend, Size
             );
+        }
+    } break;
+    case 11: /* CMP, CMPA, CMPM, EOR */
+    {
+        unsigned Mode = 07 & (Opcode >> 3),
+                 Reg = 07 & (Opcode & 07),
+                 EncodedSize = 03 & (Opcode >> 6),
+                 LeftReg = 07 & (Opcode >> 9);
+        unsigned Size = 1 << EncodedSize;
+        if (03 == EncodedSize) /* CMPA */
+        {
+            Size = Opcode & 0x0100? 
+                4: 2;
+            int32_t Src = GetData(M68k, Mode, Reg, Size);
+            int32_t Dst = M68k->R[LeftReg + 8];
+            if (Size == 2)
+            {
+                Dst = SEX(32, 16)Dst;
+                Src = SEX(32, 16)Src;
+            }
+            /* negate in 32 bit, calculate in 64, carry check in 64 */
+            uint64_t Result = (uint64_t)Dst + (uint64_t)(-(uint32_t)Src);
+            TestCommonSubtractionFlags(M68k, 
+                MASK(Result, Size) == 0,
+                Result, Dst, Src, 4
+            );
+        }
+        else if (0 == (Opcode & 0x0100)) /* CMP */
+        {
+            uint32_t Src = GetData(M68k, Mode, Reg, Size);
+            uint32_t Dst = M68k->R[LeftReg];
+            uint64_t Result = (uint64_t)Dst + (uint64_t)(-(uint32_t)Src);
+            TestCommonSubtractionFlags(M68k, 
+                MASK(Result, Size) == 0,
+                Result, Dst, Src, Size
+            );
+        }
+        else if (MODE_AN == Mode) /* CMPM */
+        {
+            uint32_t Y = GetData(M68k, MODE_POSTINC, Reg, Size);
+            uint32_t X = GetData(M68k, MODE_POSTINC, LeftReg, Size);
+            uint64_t Result = (uint64_t)X + (uint64_t)(-(uint32_t)Y);
+            TestCommonSubtractionFlags(M68k, 
+                MASK(Result, Size) == 0,
+                Result, X, Y, Size
+            );
+        }
+        else /* EOR */
+        {
+            uint32_t Src = M68k->R[LeftReg];
+            DataLocation DstLocation = GetLocation(M68k, Mode, Reg, Size);
+            uint32_t Result = GetDataFromLocation(M68k, DstLocation, Size) ^ Src;
+            TestCommonDataFlags(M68k, Result, Size);
+            WriteData(M68k, DstLocation, Result, Size);
         }
     } break;
     case 13: /* ADD, ADDX, ADDA */
