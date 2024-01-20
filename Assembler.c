@@ -329,7 +329,6 @@ typedef struct M68kAssembler
     const char *LineStart, *StartPtr, *CurrPtr;
     Token CurrentToken, NextToken;
 
-    uint32_t Org;
     MC68020MachineCode MachineCode;
 
     uint32_t IdenCount;
@@ -1640,7 +1639,7 @@ static UndefType PushUndef(M68kAssembler *Assembler, UndefType Type, uint32_t Lo
     unsigned UndefCount = Assembler->UndefCount++;
     Assembler->Undef[UndefCount].Expr = Assembler->CurrentExpr;
     Assembler->Undef[UndefCount].Type = Type;
-    Assembler->Undef[UndefCount].PC = Location + Assembler->Org;
+    Assembler->Undef[UndefCount].PC = Location;
     Assembler->Undef[UndefCount].Location = Location;
     return Type;
 }
@@ -1710,7 +1709,7 @@ static void DeclStmt(M68kAssembler *Assembler)
     {
         Value Val = {
             .Type = VAL_INT, 
-            .As.Int = Assembler->MachineCode.Size + Assembler->Org,
+            .As.Int = Assembler->MachineCode.Size,
         };
         PushSymbol(Assembler, &Identifier, Val);
     }
@@ -2625,10 +2624,16 @@ static void ConsumeStatement(M68kAssembler *Assembler)
     default: Error(Assembler, "Expected instruction, variable, label, or directive."); break;
     case TOKEN_ORG: 
     {
-        uint32_t NewOrg = StrictIntExpr(Assembler, "argument"); break;
-        if (NewOrg <= Assembler->Org)
-            Error(Assembler, "New org must be greater than previous org.");
-        else Assembler->Org = NewOrg;
+        uint32_t NewSize = StrictIntExpr(Assembler, "argument");
+        printf("new: %u, prev: %u\n", NewSize, (int)Assembler->MachineCode.Size);
+        if (NewSize < Assembler->MachineCode.Size)
+        {
+            ErrorAtLastExpr(Assembler, "Org location must be greater or equal to the current location.");
+        }
+        else if (!ResizeBufferBy(Assembler, NewSize - Assembler->MachineCode.Size))
+        {
+            return;
+        }
     } break;
     case TOKEN_DB: DefineConstant(Assembler, 1); break;
     case TOKEN_DW: DefineConstant(Assembler, 2); break;
