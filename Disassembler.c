@@ -975,6 +975,8 @@ SmallStr DisassembleSingleInstruction(DisasmBuffer *Dis, uint16_t Opcode, uint32
         }
         else /* shift by imm */
         {
+            if (0 == Shamt)
+                Shamt = 8;
             SmallStrFmt(Instruction, "%s%c%s #%u, %s", 
                 ShiftOpLut[Mode & 03], Direction, DisasmEncodedSize(Size),
                 Shamt, sRegisterName[Reg]

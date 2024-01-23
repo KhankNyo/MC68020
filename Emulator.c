@@ -28,6 +28,7 @@ typedef struct DataLocation
 #define GET_FLAG(pM68k, flFlag) \
     (((pM68k)->SR & (1 << flFlag)) != 0)
 #define FETCH_OPCODE(pM68k) ((pM68k)->Opcode = FetchImmediate(pM68k, 2))
+#define ASSERT_SIZE(Sz) ASSERT(Sz == 1 || Sz == 2 || Sz == 4)
     
 
 
@@ -91,6 +92,7 @@ MC68020 MC68020Init(uint8_t *Memory, uint32_t MemorySize, bool IsLittleEndian)
 
 static uint32_t FetchImmediate(MC68020 *M68k, unsigned Size)
 {
+    ASSERT_SIZE(Size);
     uint32_t Data = M68k->Read(M68k, M68k->PC, Size);
     M68k->PC += Size;
     return Data;
@@ -155,6 +157,7 @@ static DataLocation GetExtensionLocation(MC68020 *M68k, uint32_t BaseRegister)
 
 static DataLocation GetLocation(MC68020 *M68k, unsigned Mode, unsigned Reg, unsigned Size)
 {
+    ASSERT_SIZE(Size);
     DataLocation Location = {
         .Type = LOC_ADDR,
     };
@@ -228,6 +231,7 @@ static DataLocation GetLocation(MC68020 *M68k, unsigned Mode, unsigned Reg, unsi
 
 static uint32_t GetDataFromReg(MC68020 *M68k, unsigned RegisterIndex, unsigned Size)
 {
+    ASSERT_SIZE(Size);
     RegisterIndex &= 0xF;
     uint32_t Data = M68k->R[RegisterIndex];
     if (RegisterIndex >= 8 && Size == 2)
@@ -237,6 +241,7 @@ static uint32_t GetDataFromReg(MC68020 *M68k, unsigned RegisterIndex, unsigned S
 
 static uint32_t GetDataFromLocation(MC68020 *M68k, DataLocation Location, unsigned Size)
 {
+    ASSERT_SIZE(Size);
     switch (Location.Type)
     {
     case LOC_REG: 
@@ -257,8 +262,16 @@ static uint32_t GetDataFromLocation(MC68020 *M68k, DataLocation Location, unsign
 
 static uint32_t GetData(MC68020 *M68k, unsigned Mode, unsigned Reg, unsigned Size)
 {
+    ASSERT_SIZE(Size);
     DataLocation Location = GetLocation(M68k, Mode, Reg, Size);
     return GetDataFromLocation(M68k, Location, Size);
+}
+
+static uint32_t Blend32(uint32_t Dst, uint32_t Data, unsigned Size)
+{
+    ASSERT_SIZE(Size);
+    uint32_t DataMask = BITMASK(Size*8);
+    return (Dst & ~DataMask) | (Data & DataMask);
 }
 
 static void WriteDataToReg(MC68020 *M68k, unsigned RegisterIndex, uint32_t Data, unsigned Size)
@@ -273,13 +286,13 @@ static void WriteDataToReg(MC68020 *M68k, unsigned RegisterIndex, uint32_t Data,
     }
     else /* mix old content with new if it's a data reg */
     {
-        M68k->R[RegisterIndex] = 
-            (Dst & ~((1ull << Size*8) - 1)) | MASK(Data, Size);
+        M68k->R[RegisterIndex] = Blend32(Dst, Data, Size);
     }
 }
 
 static void WriteData(MC68020 *M68k, DataLocation Location, uint32_t Data, unsigned Size)
 {
+    ASSERT_SIZE(Size);
     switch (Location.Type)
     {
     case LOC_REG:
@@ -299,6 +312,7 @@ static void WriteData(MC68020 *M68k, DataLocation Location, uint32_t Data, unsig
 
 static void TestCommonDataFlags(MC68020 *M68k, uint32_t Data, unsigned Size)
 {
+    ASSERT_SIZE(Size);
     SET_FLAG(M68k, FLAG_C, 0);
     SET_FLAG(M68k, FLAG_V, 0);
     SET_FLAG(M68k, FLAG_Z, MASK(Data, Size) == 0);
@@ -308,6 +322,7 @@ static void TestCommonDataFlags(MC68020 *M68k, uint32_t Data, unsigned Size)
 static void TestCommonAdditionFlags(MC68020 *M68k, 
     bool ZFlagValue, uint64_t Result, uint32_t A, uint32_t B, unsigned Size)
 {
+    ASSERT_SIZE(Size);
     unsigned SignIndex = Size*8 - 1;
     A = (A >> SignIndex) & 0x1;
     B = (B >> SignIndex) & 0x1;
@@ -355,6 +370,7 @@ static bool CondIsTrue(MC68020 *M68k, MC68020ConditionalCode ConditionalCode)
 
 static void Move(MC68020 *M68k, uint16_t Opcode, unsigned Size)
 {
+    ASSERT_SIZE(Size);
     unsigned SrcMode = Opcode >> 3,
              SrcReg = Opcode,
              DstMode = Opcode >> 6,
@@ -382,6 +398,97 @@ static uint32_t Pop(MC68020 *M68k)
     return Data;
 }
 
+static uint32_t M68kShift(MC68020 *M68k, 
+    uint32_t Data, unsigned SizeInBits, unsigned ShiftCount, unsigned ShiftOpcode, unsigned DirectionIsLeft)
+{
+    ASSERT(SizeInBits == 8 || SizeInBits == 16 || SizeInBits == 32);
+    typedef enum ShiftType 
+    {
+        ARITH_SHIFT,
+        LOGICAL_SHIFT,
+        ROTATE_X,
+        ROTATE,
+    } ShiftType;
+    ShiftOpcode &= 03;
+    uint32_t BitMask = BITMASK(SizeInBits);
+    Data &= BitMask;
+
+    SET_FLAG(M68k, FLAG_V, 0);
+    uint32_t Result, 
+             RotatedPortion = 0, 
+             LastBit;
+    unsigned InverseShiftCount = SizeInBits - ShiftCount;
+    InverseShiftCount &= SizeInBits - 1;
+    /* do the shift */
+    if (DirectionIsLeft)
+    {
+        Result = Data << ShiftCount;
+        RotatedPortion = (Data >> InverseShiftCount) & BitMask;
+        LastBit = RotatedPortion & 0x1;
+        if (ShiftCount != 0)
+        {
+            if (ROTATE == ShiftOpcode)
+            {
+                Result |= RotatedPortion;
+            }
+            else if (ROTATE_X == ShiftOpcode)
+            {
+                RotatedPortion >>= 1;
+                Result |= RotatedPortion | (GET_FLAG(M68k, FLAG_X) << (ShiftCount - 1));
+            }
+        }
+
+        if (ARITH_SHIFT == ShiftOpcode)
+            SET_FLAG(M68k, FLAG_V, RotatedPortion);
+    }
+    else if (ARITH_SHIFT == ShiftOpcode) /* ASR */
+    {
+        if (SizeInBits == 8)
+            Data = SEX(32, 8)Data;
+        else if (SizeInBits == 16)
+            Data = SEX(32, 16)Data;
+        Result = ARITHMETIC_SHIFT_RIGHT32(Data, ShiftCount);
+        LastBit = Data & (1 << (SizeInBits - 1));
+    }
+    else /* right shift */
+    {
+        Result = Data >> ShiftCount;
+        RotatedPortion = (Data << InverseShiftCount) & BitMask;
+        LastBit = RotatedPortion & (1 << (SizeInBits - 1));
+        if (ShiftCount != 0)
+        {
+            if (ROTATE == ShiftOpcode)
+            {
+                Result |= RotatedPortion;
+            }
+            else if (ROTATE_X == ShiftOpcode)
+            {
+                RotatedPortion <<= 1;
+                Result |= RotatedPortion | (GET_FLAG(M68k, FLAG_X) << InverseShiftCount);
+            }
+        }
+    }
+
+    /* set flags */
+    if (ShiftCount != 0)
+    {
+        SET_FLAG(M68k, FLAG_C, LastBit);
+        if (ROTATE != ShiftOpcode)
+            SET_FLAG(M68k, FLAG_X, LastBit);
+    }
+    else if (ROTATE_X == ShiftOpcode) /* && ShiftCount == 0 */
+    {
+        SET_FLAG(M68k, FLAG_C, GET_TRUTHY_FLAG(M68k, FLAG_X));
+    }
+
+
+    Result &= BitMask;
+    SET_FLAG(M68k, FLAG_Z, Result == 0);
+    SET_FLAG(M68k, FLAG_N, Result & (1 << (SizeInBits - 1)));
+    return Result;
+}
+
+
 
 void MC68020Execute(MC68020 *M68k)
 {
@@ -405,8 +512,9 @@ void MC68020Execute(MC68020 *M68k)
             int32_t Dst = GetDataFromLocation(M68k, Location, Size);
             uint64_t Result;
 
-            if (Opcode & 0x0100) /* SUBQ */
-                Data = -Data;
+            /* SUBQ */
+            Data = Opcode & 0x0100
+                ? -Data : Data;
 
             Result = (int64_t)Dst + (int64_t)Data;
             WriteData(M68k, Location, Result, Size);
@@ -544,6 +652,10 @@ void MC68020Execute(MC68020 *M68k)
             );
         }
     } break;
+    case 10: 
+    {
+        /* TODO: illegal */
+    } break;
     case 11: /* CMP, CMPA, CMPM, EOR */
     {
         unsigned Mode = 07 & (Opcode >> 3),
@@ -662,6 +774,41 @@ void MC68020Execute(MC68020 *M68k)
                 0 == MASK(Result, Size), 
                 Result, A, B, Size
             );
+        }
+    } break;
+    case 14: /* shift instructions */
+    {
+        unsigned Reg = Opcode & 07;
+        unsigned Size = 03 & (Opcode >> 6);
+        if (03 == Size) /* shift word by 1 */ 
+        {
+            unsigned Mode = 07 & (Opcode >> 3);
+            DataLocation Location = GetLocation(M68k, Mode, Reg, 2);
+            uint32_t Data = GetDataFromLocation(M68k, Location, 2);
+            uint32_t Result = M68kShift(M68k, 
+                Data, 16, 1, /* 16 bit shift only */ 
+                Opcode >> 9, Opcode & 0x0100
+            );
+            WriteData(M68k, Location, Result, 2);
+        }
+        else
+        {
+            unsigned DecodedSize = 1 << Size;
+            unsigned ShiftCount, Index = 07 & (Opcode >> 9);
+            if (Opcode & 0x0020) /* shift by register mod 64 */
+            {
+                ShiftCount = M68k->R[Index] % 64lu;
+            }
+            else
+            {
+                ShiftCount = Index == 0? 8 : Index;
+            }
+            uint32_t Data = M68k->R[Reg];
+            uint32_t Result = M68kShift(M68k, 
+                Data, DecodedSize*8, ShiftCount, 
+                Opcode >> 3, Opcode & 0x0100
+            );
+            M68k->R[Reg] = Blend32(M68k->R[Reg], Result, DecodedSize);
         }
     } break;
     default: break;

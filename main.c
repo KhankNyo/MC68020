@@ -1,6 +1,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "MC68020Isa.h"
 #include "Emulator.h"
@@ -171,11 +172,15 @@ int main(int argc, char **argv)
     MC68020 M68k = MC68020Init(Memory.Buffer, Memory.Size, LittleEndian);
     M68k.Read = MemRead;
     M68k.Write = MemWrite;
-    while ('q' != GetInput())
+    double Start = clock();
+    while (M68k.R[0] != 100000000ul) /* 100_000_000 */
     {
         MC68020Execute(&M68k);
-        DumpState(&M68k);
+        //DumpState(&M68k);
     }
+    double Elapsed = (clock() - Start) / CLOCKS_PER_SEC;
+    printf("\nElapsed: %f\n", Elapsed);
+
     free(Memory.Buffer);
     return 0;
 }

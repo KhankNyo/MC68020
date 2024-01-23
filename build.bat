@@ -2,8 +2,8 @@
 
 
 set "CC=gcc"
-set "CCFLAGS=-O0 -ggdb -Wall -Wextra -Wpedantic -Wno-missing-braces -IInclude"
-set "LDFLAGS= "
+set "CCFLAGS=-O2 -flto -Wall -Wextra -Wpedantic -Wno-missing-braces -IInclude -Wno-unused-local-typedefs"
+set "LDFLAGS= -flto "
 set "LIBS= "
 
 if "clean"=="%1" (
@@ -16,7 +16,7 @@ if "clean"=="%1" (
 
     if not exist bin\ mkdir bin
     pushd bin
-    cl /DEBUG /Zi /I"Include"  main.exe ..\build.c
+    cl /Zi /O2 /IP:\C\m68k\Include ..\build.c /Femain.exe
     popd 
 
     echo ---------------------------

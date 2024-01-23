@@ -3534,7 +3534,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             }
             if (1 == Size || 4 == Size)
             {
-                Error(Assembler, STRVIEW_FMT" can only shift memory word.", 
+                Error(Assembler, STRVIEW_FMT" can with one argument only shift memory word.", 
                     STRVIEW_FMT_ARG(Instruction.Lexeme)
                 );
             }

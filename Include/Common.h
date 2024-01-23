@@ -5,14 +5,23 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define MASK(Value, Size) \
-    ((Value) & ((1ull << (Size)*8) - 1))
+#define MASK(Value, SizeInBytes) \
+    ((Value) & ((1ull << (SizeInBytes)*8) - 1))
+#define IS_SIGNED(Value, ValSizeInBytes) \
+    ((Value) & (1ull << (8*(ValSizeInBytes) - 1)))
+
+#define BITMASK(BitCount) ((1ull << (BitCount)) - 1)
 #define SEX(To, From) (int##To##_t)(int##From##_t)
 #define STATIC_ARRAY_SIZE(Array) (sizeof(Array) / sizeof((Array)[0]))
+/* TODO: Undefined behavior, used ~(~x >> n) but gcc does not compile to 'asr'  */
+#define ARITHMETIC_SHIFT_RIGHT32(x, n) ((int32_t)(x) >> (n)) 
 
 #define strfy_1(Expression) #Expression
 #define STRFY(Expression) strfy_1(Expression)
 #define DIE() (*(volatile char *)0 = 0)
+
+
+#ifdef DEBUG 
 #define UNREACHABLE(...) do {\
     fprintf(stderr, __FILE__": Unreachable on line "STRFY(__LINE__)":\n    "\
             __VA_ARGS__\
@@ -20,6 +29,18 @@
     fputc('\n', stderr);\
     DIE();\
 } while (0)
+#  define ASSERT(Cond) do {\
+    if (!(Cond)) UNREACHABLE();\
+} while (0)
+
+#elif defined(__GNUC__) || defined(__clang__)
+#  define UNREACHABLE(...) __builtin_unreachable()
+#  define ASSERT(Cond) if (!(Cond)) UNREACHABLE()
+
+#else
+#  define UNREACHABLE(...) do {} while(0)
+#  define ASSERT(Cond) do {} while (0)
+#endif /* DEBUG */
 
 
 #if defined(__LITTLE_ENDIAN__)
