@@ -43,6 +43,7 @@ typedef enum TokenType
     /* directives */
     TOKEN_ORG,
     TOKEN_ALIGN,
+    TOKEN_DC, /* compatibility with other assembler */
     TOKEN_DB,
     TOKEN_DW,
     TOKEN_DL,
@@ -91,6 +92,7 @@ typedef enum TokenType
     TOKEN_CMPM,
     /* TODO: cp instructions */
 
+    TOKEN_DBRA,
     TOKEN_DBcc,
     TOKEN_DIVS,
     TOKEN_DIVU,
@@ -699,6 +701,7 @@ static Token ConsumeIdentifier(M68kAssembler *Assembler, char FirstLetter)
             KEYWORD(SR),
         },
         ['D'] = {
+            INS(DBRA),
             INS(DBcc),
             INS(DIVS),
             INS(DIVU),
@@ -2639,6 +2642,18 @@ static void ConsumeStatement(M68kAssembler *Assembler)
     case TOKEN_DW: DefineConstant(Assembler, 2); break;
     case TOKEN_DL: DefineConstant(Assembler, 4); break;
     case TOKEN_DQ: DefineConstant(Assembler, 8); break;
+    case TOKEN_DC:
+    {
+        if (ConsumeIfNextTokenIs(Assembler, TOKEN_DOT))
+        {
+            unsigned Size = ConsumeSizeSpecifier(Assembler);
+            DefineConstant(Assembler, Size);
+        }
+        else
+        {
+            Error(Assembler, "Expected size specifier after DC directive.");
+        }
+    } break;
     case TOKEN_RESV: 
     {
         uint32_t AdditionalSize = StrictIntExpr(Assembler, "argument");
@@ -3652,6 +3667,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             Emit(Assembler, 0x6000 | Cond | (Offset & 0xFF), 2);
         }
     } break;
+    case TOKEN_DBRA:
     case TOKEN_DBcc:
     {
         IgnoreSize(Assembler, &Instruction);
@@ -3660,9 +3676,13 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         uint32_t OffsetLocation = Assembler->MachineCode.Size + 2;
         uint32_t Offset = 
             IntExpr(Assembler, "Branch target", UNDEF_BRANCH_WORD, OffsetLocation) - (OffsetLocation);
+        uint32_t ConditionalCode = (TOKEN_DBRA == Type) 
+            ? 0
+            : (uint32_t)Instruction.Data.ConditionalCode << 8;
+
         Emit(Assembler, 
             0x50C8
-            | ((uint32_t)Instruction.Data.ConditionalCode << 8)
+            | ConditionalCode
             | Reg, 2
         );
         Emit(Assembler, Offset, 2);
@@ -3877,7 +3897,7 @@ MC68020MachineCode MC68020Assemble(AllocatorFn Allocator,
     }
     if (Assembler.Error || Assembler.CriticalError)
     {
-        Allocator(Assembler.MachineCode.Buffer, 0);
+        Allocator(Assembler.MachineCode.Buffer, 0); /* deallocate the buffer */
         Assembler.MachineCode = (MC68020MachineCode) { 0 };
     }
 

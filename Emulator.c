@@ -501,6 +501,106 @@ void MC68020Execute(MC68020 *M68k)
     case 1: Move(M68k, Opcode, 1); break;
     case 2: Move(M68k, Opcode, 4); break;
     case 3: Move(M68k, Opcode, 2); break;
+    case 4:
+    {
+        unsigned Mode = 07 & (Opcode >> 3),
+                 Reg = 07 & (Opcode & 07);
+        if ((Opcode & 0x0B80) == 0x0880) /* MOVEM, EXT */
+        {
+            unsigned LongSize = Opcode & 0x0040;
+            if (Mode == 0) /* EXT */
+            {
+                uint32_t Data = M68k->R[Reg];
+                if (LongSize) /* sign extend word to long */
+                {
+                    M68k->R[Reg] = SEX(32, 16)Data;
+                }
+                else /* sign extend byte to word */
+                {
+                    M68k->R[Reg] = (Data & 0xFFFF0000) 
+                        | (SEX(16, 8)Data & 0x0000FFFF);
+                }
+            }
+            else /* MOVEM */
+            {
+                unsigned Size = LongSize? 4: 2;
+                uint16_t RegisterList = FetchImmediate(M68k, 2);
+
+                if (Opcode & 0x0800) /* mem->reg */
+                {
+                    uint32_t Address;
+                    if (MODE_POSTINC == Mode)
+                    {
+                        /* NOTE:
+                         * for MC68000 and MC68010, only the initial value in reg will be written if RegisterList contains Reg
+                         * for MC68020 or above, the written value will be 
+                         *  the initial value plus the size of the operation
+                         * */
+                        Address = M68k->R[Reg + 8];
+                        M68k->R[Reg + 8] += CountBits(RegisterList)*Size;
+                    }
+                    else
+                    {
+                        Address = GetLocation(M68k, Mode, Reg, Size).As.EffectiveAddr;
+                    }
+
+                    int i = 0;
+                    while (RegisterList)
+                    {
+                        if ((RegisterList & 0x1) && i != (int)(Reg + 8))
+                        {
+                            uint32_t Data = M68k->Read(M68k, Address, Size);
+                            M68k->R[i] = LongSize
+                                ? Data
+                                : SEX(32, 16)Data;
+                            Address += Size;
+                        }
+                        i++;
+                    }
+
+                    /* simulate extra read, always word-sized */
+                    M68k->Read(M68k, Address, 2);
+                }
+                else if (Mode == MODE_PREDEC) /* reg->mem, predec */
+                {
+                    int i = 15; 
+                    uint32_t Address = M68k->R[Reg + 8];
+                    /* NOTE:
+                     * for MC68000 and MC68010, only the initial value in reg will be written if RegisterList contains Reg
+                     * for MC68020 or above, the written value will be 
+                     *  the initial value minus the size of the operation
+                     * */
+                    M68k->R[Reg + 8] -= CountBits(RegisterList)*Size;
+
+                    while (RegisterList)
+                    {
+                        if ((RegisterList & 0x1) && i != (int)(Reg + 8))
+                        {
+                            Address -= Size;
+                            M68k->Write(M68k, Address, M68k->R[i], Size);
+                        }
+                        i--;
+                        RegisterList >>= 1;
+                    }
+                }
+                else /* reg->mem */
+                {
+                    uint32_t Address = GetLocation(M68k, Mode, Reg, Size).As.EffectiveAddr;
+                    int i = 0;
+                    while (RegisterList)
+                    {
+                        if (RegisterList & 0x1)
+                        {
+                            M68k->Write(M68k, Address, M68k->R[i], Size);
+                            Address += Size;
+                        }
+                        RegisterList >>= 1;
+                        i++;
+                    }
+                }
+            }
+        }
+    } break;
     case 5: /* ADDQ, SUBQ, Scc, DBcc */
     {
         unsigned Mode = 07 & (Opcode >> 3),
