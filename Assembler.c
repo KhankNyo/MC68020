@@ -3617,6 +3617,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         }
 
         uint32_t OffsetLocation = Assembler->MachineCode.Size + 2;
+        unsigned UndefCount = Assembler->UndefCount;
         int32_t Offset = 
             IntExpr(Assembler, "Branch target", Type, OffsetLocation) - (OffsetLocation);
         uint32_t Cond = Instruction.Data.ConditionalCode;
@@ -3627,7 +3628,8 @@ static void ConsumeStatement(M68kAssembler *Assembler)
             Cond = 1;
         Cond <<= 8;
 
-        bool SpecialOffset = 0 == Offset || -1 == Offset;
+        bool SpecialOffset = (0 == Offset || -1 == Offset)
+            && UndefCount == Assembler->UndefCount; /* label has been encountered */
         if (Size == 4 
         || (Size == 0 && !IN_I16(Offset)))
         {
@@ -3644,6 +3646,7 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         {
             if (Size == 1 && SpecialOffset)
             {
+                printf("%d\n", Offset);
                 ErrorAtLastExpr(Assembler, "Byte offset is not possible, use '.w' instead.");
             }
             Emit(Assembler, 0x6000 | Cond | (Offset & 0xFF), 2);

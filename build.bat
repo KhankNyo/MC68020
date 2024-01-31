@@ -1,7 +1,7 @@
 @echo off
 
 
-set "CC=gcc"
+set "CC=tcc"
 set "CCFLAGS=-O2 -flto -Wall -Wextra -Wpedantic -Wno-missing-braces -IInclude -Wno-unused-local-typedefs"
 set "LDFLAGS= -flto "
 set "LIBS= "

@@ -495,6 +495,9 @@ void MC68020Execute(MC68020 *M68k)
     uint16_t Opcode = FETCH_OPCODE(M68k);
     switch (Opcode >> 12)
     {
+    case 0:
+    {
+    } break;
     case 1: Move(M68k, Opcode, 1); break;
     case 2: Move(M68k, Opcode, 4); break;
     case 3: Move(M68k, Opcode, 2); break;
