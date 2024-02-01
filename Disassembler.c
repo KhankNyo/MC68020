@@ -414,7 +414,6 @@ static SmallStr DisasmPreDecOrDn(const char *Mnemonic, uint16_t Opcode)
 static SmallStr DisasmRegMask(uint16_t RegMask, bool Reversed)
 {
     SmallStr RegList = { 0 };
-    SmallStrAppend(RegList, "{ ");
     if (Reversed)
         RegMask = ReverseBits16(RegMask);
 
@@ -445,8 +444,6 @@ static SmallStr DisasmRegMask(uint16_t RegMask, bool Reversed)
             i++;
         }
     }
-
-    SmallStrAppend(RegList, " }");
     return RegList;
 }
 
@@ -469,17 +466,20 @@ static SmallStr DisasmMiscInstructions(DisasmBuffer *Dis, uint16_t Opcode)
             const char *ExtendTo = Opcode & 0x0040? ".l": ".w";
             SmallStrFmt(Ret, "ext%s%s %s", Byte, ExtendTo, sRegisterName[Reg]);
         }
-        else if (Mode != 01)
+        else if (Mode != 01) /* MOVEM */
         {
-            unsigned DecodedSize = Opcode & 0x0040? 4: 2,
-                     MemToReg = 0 != (Opcode & 0x0400);
+            unsigned DecodedSize = Opcode & 0x0040? 4: 2;
             unsigned RegMask = CheckAndRead(Dis, 2);
-            SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, DecodedSize);
-            SmallStr RegList = DisasmRegMask(RegMask, Mode == 0x4 && !MemToReg);
+            unsigned ReglistToMem = 0 == (Opcode & (1 << 10));
+            bool PredecrementMode = Mode == 0x4 && ReglistToMem;
+            const char *Size = Opcode & (1 << 6)? ".l" : ".w";
 
-            if (MemToReg)
-                SmallStrFmt(Ret, "movem %s, %s", RegList.Data, Ea.Data);
-            else SmallStrFmt(Ret, "movem %s, %s", Ea.Data, RegList.Data);
+            SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, DecodedSize);
+            SmallStr RegList = DisasmRegMask(RegMask, PredecrementMode);
+
+            if (ReglistToMem)
+                SmallStrFmt(Ret, "movem%s %s, %s", Size, RegList.Data, Ea.Data);
+            else SmallStrFmt(Ret, "movem%s %s, %s", Size, Ea.Data, RegList.Data);
         }
         return Ret;
     }

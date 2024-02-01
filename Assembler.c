@@ -2916,40 +2916,41 @@ static void ConsumeStatement(M68kAssembler *Assembler)
 
         uint16_t Opcode, List;
         EaEncoding Ea;
-        if (ConsumeIfNextTokenIs(Assembler, TOKEN_LCURLY)) /* mem to reg, postinc */
+        if (NextTokenIs(TOKEN_DATA_REG) || NextTokenIs(TOKEN_ADDR_REG) 
+        || ConsumeIfNextTokenIs(Assembler, TOKEN_POUND)) /* reglist to mem */
         {
             List = RegListOperand(Assembler);
-            ConsumeOrError(Assembler, TOKEN_RCURLY, "Expected '}' after register list.");
             CONSUME_COMMA();
             Argument Dst = ConsumeEa(Assembler, 4, Size);
-
             Ea = EncodeEa(Dst);
-            Opcode = 0x4C80;
+
+            Opcode = 0x4880;
             if (ARG_DATA_REG == Dst.Type || ARG_ADDR_REG == Dst.Type 
-            || ARG_IND_PREDEC == Dst.Type || ARG_IMMEDIATE == Dst.Type
-            || AddrmUsePC(Dst))
+            || ARG_IMMEDIATE == Dst.Type || AddrmUsePC(Dst) 
+            || ARG_IND_POSTINC == Dst.Type)
             {
                 ErrorInvalidAddrMode(Assembler, &Instruction, Dst, "destination");
             }
+
+            /* reverse the list only for predec addr mode */
+            if (Dst.Type == ARG_IND_PREDEC)
+                List = ReverseBits16(List);
         }
-        else /* reg to mem predec */
+        else /* mem to reglist */
         {
             Argument Src = ConsumeEa(Assembler, 4, Size);
             Ea = EncodeEa(Src);
             CONSUME_COMMA();
-            ConsumeOrError(Assembler, TOKEN_LCURLY, "Expected '{'.");
             List = RegListOperand(Assembler);
-            if (Src.Type == ARG_IND_PREDEC)
-                List = ReverseBits16(List);
-            ConsumeOrError(Assembler, TOKEN_RCURLY, "Expected '}'.");
 
-            Opcode = 0x4880;
+            Opcode = 0x4C80;
             if (ARG_DATA_REG == Src.Type || ARG_ADDR_REG == Src.Type 
-            || ARG_IND_POSTINC == Src.Type || ARG_IMMEDIATE == Src.Type)
+            || ARG_IMMEDIATE == Src.Type || AddrmUsePC(Src) 
+            || ARG_IND_PREDEC == Src.Type)
             {
                 ErrorInvalidAddrMode(Assembler, &Instruction, Src, "source");
             }
-        }
+        }       
 
         Emit(Assembler, 
             Opcode

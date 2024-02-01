@@ -398,6 +398,26 @@ static uint32_t Pop(MC68020 *M68k)
     return Data;
 }
 
+static void ReadList(MC68020 *M68k, uint16_t RegisterList, uint32_t Address, unsigned DataSize)
+{
+    ASSERT_SIZE(DataSize);
+    unsigned i = 0;
+    Address -= DataSize;
+    while (RegisterList)
+    {
+        if (RegisterList & 0x1)
+        {
+            Address += DataSize;
+            uint32_t Data = M68k->Read(M68k, Address, DataSize);
+            M68k->R[i] = DataSize == 2? 
+                SEX(32, 16)Data : (int32_t)Data;
+        }
+        i++;
+        RegisterList >>= 1;
+    }
+}
+
+
 static uint32_t M68kShift(MC68020 *M68k, 
     uint32_t Data, unsigned SizeInBits, unsigned ShiftCount, unsigned ShiftOpcode, unsigned DirectionIsLeft)
 {
@@ -489,7 +509,6 @@ static uint32_t M68kShift(MC68020 *M68k,
 }
 
 
-
 void MC68020Execute(MC68020 *M68k)
 {
     uint16_t Opcode = FETCH_OPCODE(M68k);
@@ -526,36 +545,25 @@ void MC68020Execute(MC68020 *M68k)
                 unsigned Size = LongSize? 4: 2;
                 uint16_t RegisterList = FetchImmediate(M68k, 2);
 
-                if (Opcode & 0x0800) /* mem->reg */
+                if (Opcode & (1 << 10)) /* mem->reg */
                 {
                     uint32_t Address;
-                    if (MODE_POSTINC == Mode)
+                    if (Mode == MODE_POSTINC)
                     {
-                        /* NOTE:
-                         * for MC68000 and MC68010, only the initial value in reg will be written if RegisterList contains Reg
-                         * for MC68020 or above, the written value will be 
-                         *  the initial value plus the size of the operation
-                         * */
                         Address = M68k->R[Reg + 8];
-                        M68k->R[Reg + 8] += CountBits(RegisterList)*Size;
+                        ReadList(M68k, RegisterList, Address, Size);
+
+                        /* NOTE:
+                         * for MC68000 and MC68010, only the initial value in Reg will be written if RegisterList contains Reg
+                         * for MC68020 or above, the written value will be 
+                         *  the initial value plus the size of the operation, aka the final addr 
+                         * */
+                        M68k->R[Reg + 8] = CountBits(RegisterList)*Size;
                     }
                     else
                     {
                         Address = GetLocation(M68k, Mode, Reg, Size).As.EffectiveAddr;
-                    }
-
-                    int i = 0;
-                    while (RegisterList)
-                    {
-                        if ((RegisterList & 0x1) && i != (int)(Reg + 8))
-                        {
-                            uint32_t Data = M68k->Read(M68k, Address, Size);
-                            M68k->R[i] = LongSize
-                                ? Data
-                                : SEX(32, 16)Data;
-                            Address += Size;
-                        }
-                        i++;
+                        ReadList(M68k, RegisterList, Address, Size);
                     }
 
                     /* simulate extra read, always word-sized */
@@ -565,16 +573,10 @@ void MC68020Execute(MC68020 *M68k)
                 {
                     int i = 15; 
                     uint32_t Address = M68k->R[Reg + 8];
-                    /* NOTE:
-                     * for MC68000 and MC68010, only the initial value in reg will be written if RegisterList contains Reg
-                     * for MC68020 or above, the written value will be 
-                     *  the initial value minus the size of the operation
-                     * */
-                    M68k->R[Reg + 8] -= CountBits(RegisterList)*Size;
-
                     while (RegisterList)
                     {
-                        if ((RegisterList & 0x1) && i != (int)(Reg + 8))
+                        if (RegisterList & 0x1)
+                        /* don't write to the register being decremented */
                         {
                             Address -= Size;
                             M68k->Write(M68k, Address, M68k->R[i], Size);
@@ -582,21 +584,18 @@ void MC68020Execute(MC68020 *M68k)
                         i--;
                         RegisterList >>= 1;
                     }
+
+                    /* NOTE:
+                     * for MC68000 and MC68010, only the initial value in reg will be written if RegisterList contains Reg
+                     * for MC68020 or above, the written value will be 
+                     *  the initial value minus the size of the operation, aka the final addr 
+                     * */
+                    M68k->R[Reg + 8] = Address;
                 }
                 else /* reg->mem */
                 {
                     uint32_t Address = GetLocation(M68k, Mode, Reg, Size).As.EffectiveAddr;
-                    int i = 0;
-                    while (RegisterList)
-                    {
-                        if (RegisterList & 0x1)
-                        {
-                            M68k->Write(M68k, Address, M68k->R[i], Size);
-                            Address += Size;
-                        }
-                        RegisterList >>= 1;
-                        i++;
-                    }
+                    ReadList(M68k, RegisterList, Address, Size);
                 }
             }
         }
