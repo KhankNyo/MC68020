@@ -131,15 +131,16 @@ static DataLocation GetExtensionLocation(MC68020 *M68k, uint32_t BaseRegister)
         if (0 == (Extension & 0x0080)) /* Base is not suppressed? */
             BaseDisplacement = FetchExtensionImmediate(M68k, Extension >> 4);
 
-        /* calculate effective addr */
-        Location.As.EffectiveAddr = Extension & 04?
-            BaseDisplacement + BaseRegister + Index 
-            : BaseDisplacement + BaseRegister;
+        Location.As.EffectiveAddr = Extension & 04? /* post indexed? */
+            BaseDisplacement + BaseRegister 
+            : BaseDisplacement + BaseRegister + Index;
 
         if ((Extension & 03) >= 1) /* Memory indirect? */
         {
             Location.As.EffectiveAddr = M68k->Read(M68k, Location.As.EffectiveAddr, 4);
             Location.As.EffectiveAddr += FetchExtensionImmediate(M68k, Extension);
+            if (Extension & 04) /* post indexed? */
+                Location.As.EffectiveAddr += Index;
         }
     }
     else
@@ -591,6 +592,35 @@ void MC68020Execute(MC68020 *M68k)
                     ReadList(M68k, RegisterList, Address, Size);
                 }
             }
+        }
+        else if ((Opcode & 0x0F80) == 0x0800) /* SWAP, PEA, NBCD */
+        {
+            if ((Opcode & (1 << 6)) == 0) /* NBCD */
+            {
+                /* TODO: NBCD */
+            }
+            else if (Mode == 0) /* SWAP */
+            {
+                M68k->R[Reg] = 
+                    (M68k->R[Reg] >> 16)
+                    | (M68k->R[Reg] << 16);
+                TestCommonDataFlags(M68k, M68k->R[Reg], 4);
+            }
+            else /* PEA */
+            {
+                uint32_t EffectiveAddress = GetLocation(M68k, Mode, Reg, 4).As.EffectiveAddr;
+                Push(M68k, EffectiveAddress);
+            }
+        }
+        else if ((Opcode & 0x01C0) == 0x01C0) /* LEA */
+        {
+            uint32_t EffectiveAddress = GetLocation(M68k, Mode, Reg, 4).As.EffectiveAddr;
+            unsigned Rd = 0x7 & (Opcode >> 9);
+            M68k->R[Rd + 8] = EffectiveAddress;
+        }
+        else if ((Opcode & 0x01C0) == 0x0180) /* CHK */
+        {
+            /* TODO: chk */
         }
     } break;
     case 5: /* ADDQ, SUBQ, Scc, DBcc */

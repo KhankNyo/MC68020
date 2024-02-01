@@ -707,6 +707,7 @@ static Token ConsumeIdentifier(M68kAssembler *Assembler, char FirstLetter)
             INS(DIVU),
             INS(DIVSL),
             INS(DIVUL),
+            KEYWORD(DC),
             KEYWORD(DB),
             KEYWORD(DW),
             KEYWORD(DL),

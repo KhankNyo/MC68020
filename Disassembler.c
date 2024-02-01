@@ -490,7 +490,7 @@ static SmallStr DisasmMiscInstructions(DisasmBuffer *Dis, uint16_t Opcode)
         if (Opcode & 0x0040) /* LEA */
         {
             SmallStr Ea = DisasmModeReg(Dis, Mode, Reg, 4);
-            SmallStrFmt(Ret, "lea.l %s, %s", Ea.Data, sRegisterName[LeftReg]);
+            SmallStrFmt(Ret, "lea.l %s, %s", Ea.Data, sRegisterName[LeftReg + 8]);
         }
         else /* CHK */
         {
