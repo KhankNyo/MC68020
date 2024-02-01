@@ -27,7 +27,8 @@ typedef struct DataLocation
     ((pM68k)->SR & (1 << flFlag))
 #define GET_FLAG(pM68k, flFlag) \
     (((pM68k)->SR & (1 << flFlag)) != 0)
-#define FETCH_OPCODE(pM68k) ((pM68k)->Opcode = FetchImmediate(pM68k, 2))
+#define FETCH_IMMEDIATE(pM68k, uSize) ((pM68k)->PC += uSize, (pM68k)->Read(pM68k, pM68k->PC - (uSize), uSize))
+#define FETCH_OPCODE(pM68k) ((pM68k)->Opcode = FETCH_IMMEDIATE(pM68k, 2))
 #define ASSERT_SIZE(Sz) ASSERT(Sz == 1 || Sz == 2 || Sz == 4)
     
 
@@ -35,7 +36,7 @@ typedef struct DataLocation
 static uint32_t DefaultReadLittleEndian(MC68020 *M68k, uint32_t Addr, unsigned Size)
 {
     uint32_t Data = 0;
-    if (Addr + Size > M68k->MemorySize && Addr < M68k->MemorySize)
+    if (Addr + Size > M68k->MemorySize || Addr > M68k->MemorySize) /* overflow guard */
         return 0;
 
     for (unsigned i = 0; i < Size; i++)
@@ -48,7 +49,7 @@ static uint32_t DefaultReadLittleEndian(MC68020 *M68k, uint32_t Addr, unsigned S
 static uint32_t DefaultReadBigEndian(MC68020 *M68k, uint32_t Addr, unsigned Size)
 {
     uint32_t Data = 0;
-    if (Addr + Size > M68k->MemorySize && Addr < M68k->MemorySize)
+    if (Addr + Size > M68k->MemorySize || Addr > M68k->MemorySize)
         return 0;
 
     for (int i = Size - 1; i >= 0; i--)
@@ -60,7 +61,7 @@ static uint32_t DefaultReadBigEndian(MC68020 *M68k, uint32_t Addr, unsigned Size
 
 static void DefaultWriteLittleEndian(MC68020 *M68k, uint32_t Addr, uint32_t Data, unsigned Size)
 {
-    if (Addr + Size > M68k->MemorySize && Addr < M68k->MemorySize)
+    if (Addr + Size > M68k->MemorySize || Addr > M68k->MemorySize)
         return;
     for (unsigned i = 0; i < Size; i++)
     {
@@ -70,7 +71,7 @@ static void DefaultWriteLittleEndian(MC68020 *M68k, uint32_t Addr, uint32_t Data
 
 static void DefaultWriteBigEndian(MC68020 *M68k, uint32_t Addr, uint32_t Data, unsigned Size)
 {
-    if (Addr + Size > M68k->MemorySize && Addr < M68k->MemorySize)
+    if (Addr + Size > M68k->MemorySize || Addr > M68k->MemorySize)
         return;
     for (int i = Size - 1; i >= 0; i--)
     {
@@ -90,14 +91,6 @@ MC68020 MC68020Init(uint8_t *Memory, uint32_t MemorySize, bool IsLittleEndian)
     return M68k;
 }
 
-static uint32_t FetchImmediate(MC68020 *M68k, unsigned Size)
-{
-    ASSERT_SIZE(Size);
-    uint32_t Data = M68k->Read(M68k, M68k->PC, Size);
-    M68k->PC += Size;
-    return Data;
-}
-
 static int32_t FetchExtensionImmediate(MC68020 *M68k, unsigned EncodedSize)
 {
     switch (EncodedSize & 03)
@@ -105,8 +98,8 @@ static int32_t FetchExtensionImmediate(MC68020 *M68k, unsigned EncodedSize)
     default:
     case 0:
     case 1: return 0;
-    case 2: return SEX(32, 16)FetchImmediate(M68k, 2);
-    case 3: return (int32_t)FetchImmediate(M68k, 4);
+    case 2: return SEX(32, 16)FETCH_IMMEDIATE(M68k, 2);
+    case 3: return (int32_t)FETCH_IMMEDIATE(M68k, 4);
     }
 }
 
@@ -115,7 +108,7 @@ static DataLocation GetExtensionLocation(MC68020 *M68k, uint32_t BaseRegister)
     DataLocation Location = {
         .Type = LOC_ADDR,
     };
-    unsigned Extension = FetchImmediate(M68k, 2);
+    unsigned Extension = FETCH_IMMEDIATE(M68k, 2);
     if (Extension & 0x0100) /* Full extension? */
     {
         int32_t Index = 0;
@@ -143,14 +136,15 @@ static DataLocation GetExtensionLocation(MC68020 *M68k, uint32_t BaseRegister)
                 Location.As.EffectiveAddr += Index;
         }
     }
-    else
+    else /* brief extension */
     {
         int32_t IndexRegister = M68k->R[Extension >> 12];
         if (Extension & 0x0800) /* Index word? */
             IndexRegister = SEX(32, 16)IndexRegister;
-        IndexRegister <<= (Extension >> 9) & 03;
 
-        int32_t Displacement = SEX(32, 8)Extension;
+        IndexRegister <<= (Extension >> 9) & 03; /* multiplier */
+
+        int32_t Displacement = SEX(32, 8)Extension; /* sign extend 8 bit displacement */
         Location.As.EffectiveAddr = BaseRegister + IndexRegister + Displacement;
     }
     return Location;
@@ -192,7 +186,7 @@ static DataLocation GetLocation(MC68020 *M68k, unsigned Mode, unsigned Reg, unsi
     } break;
     case MODE_IND_I16: /* (D16, An) */
     {
-        int32_t Displacement = SEX(32, 16)FetchImmediate(M68k, 2);
+        int32_t Displacement = SEX(32, 16)FETCH_IMMEDIATE(M68k, 2);
         Location.As.EffectiveAddr = M68k->R[Reg + 8] + Displacement;
     } break;
     case MODE_INDEX: /* Index */
@@ -205,12 +199,12 @@ static DataLocation GetLocation(MC68020 *M68k, unsigned Mode, unsigned Reg, unsi
         switch (Reg)
         {
         /* abs */
-        case 0: Location.As.EffectiveAddr = FetchImmediate(M68k, 2); break;
-        case 1: Location.As.EffectiveAddr = FetchImmediate(M68k, 4); break;
+        case 0: Location.As.EffectiveAddr = FETCH_IMMEDIATE(M68k, 2); break;
+        case 1: Location.As.EffectiveAddr = FETCH_IMMEDIATE(M68k, 4); break;
         /* (D16, PC) */
         case 2:
         {
-            int32_t Displacement = SEX(32, 16)FetchImmediate(M68k, 2);
+            int32_t Displacement = SEX(32, 16)FETCH_IMMEDIATE(M68k, 2);
             Location.As.EffectiveAddr = PC + Displacement;
         } break;
         /* PC index */
@@ -222,7 +216,7 @@ static DataLocation GetLocation(MC68020 *M68k, unsigned Mode, unsigned Reg, unsi
         case 4:
         {
             Location.Type = LOC_IMM;
-            Location.As.Immediate = FetchImmediate(M68k, 1 == Size? 2: Size);
+            Location.As.Immediate = FETCH_IMMEDIATE(M68k, uMax(Size, 2));
         } break;
         }
     } break;
@@ -279,7 +273,7 @@ static void WriteDataToReg(MC68020 *M68k, unsigned RegisterIndex, uint32_t Data,
 {
     RegisterIndex &= 0xF;
     uint32_t Dst = M68k->R[RegisterIndex];
-    if (RegisterIndex >= 8) /* store whole register is dst is an addr reg */
+    if (RegisterIndex >= 8) /* store whole register if dst is an addr reg */
     {
         if (Size == 2)
             Data = SEX(32, 16)Data;
@@ -530,14 +524,13 @@ void MC68020Execute(MC68020 *M68k)
                 }
                 else /* sign extend byte to word */
                 {
-                    M68k->R[Reg] = (Data & 0xFFFF0000) 
-                        | (SEX(16, 8)Data & 0x0000FFFF);
+                    M68k->R[Reg] = Blend32(M68k->R[Reg], SEX(16, 8)Data, 2);
                 }
             }
             else /* MOVEM */
             {
                 unsigned Size = LongSize? 4: 2;
-                uint16_t RegisterList = FetchImmediate(M68k, 2);
+                uint16_t RegisterList = FETCH_IMMEDIATE(M68k, 2);
 
                 if (Opcode & (1 << 10)) /* mem->reg */
                 {
@@ -654,13 +647,13 @@ void MC68020Execute(MC68020 *M68k)
             if (MODE_AN == Mode) /* DBcc */
             {
                 int32_t PC = M68k->PC; /* addr of DBcc + 2 */
-                int32_t Offset = SEX(32, 16)FetchImmediate(M68k, 2);
+                int32_t Offset = SEX(32, 16)FETCH_IMMEDIATE(M68k, 2);
                 if (Cond) /* do nothing is cond is true */
                     break;
 
                 /* subtract low word of register by 1 */
                 int32_t Result = (int16_t)(M68k->R[Reg] & 0xFFFF) - 1;
-                M68k->R[Reg] = (M68k->R[Reg] & 0xFFFF0000) | (Result & 0xFFFF);
+                M68k->R[Reg] = Blend32(M68k->R[Reg], Result, 2);
 
                 if (-1 != Result)  /* only branch if result is not -1 */
                 {
@@ -679,10 +672,10 @@ void MC68020Execute(MC68020 *M68k)
     {
         int32_t PC = M68k->PC;
         int32_t Offset = SEX(32, 8)(Opcode);
-        if (-1 == Offset)
-            Offset = FetchImmediate(M68k, 4);
-        else if (0 == Offset)
-            Offset = SEX(32, 16)FetchImmediate(M68k, 2);
+        if (-1 == Offset) /* long branch offset instead */
+            Offset = FETCH_IMMEDIATE(M68k, 4);
+        else if (0 == Offset) /* word branch offset instead */
+            Offset = SEX(32, 16)FETCH_IMMEDIATE(M68k, 2);
 
         MC68020ConditionalCode Cond = 0xF & (Opcode >> 8);
         if (CC_F == Cond) /* BSR */
@@ -761,7 +754,7 @@ void MC68020Execute(MC68020 *M68k)
             {
                 Minuend = GetDataFromLocation(M68k, SrcLocation, Size);
                 Subtrahend = GetDataFromReg(M68k, LeftReg, Size);
-                Result = (uint64_t)Minuend + (uint64_t)(-(uint32_t)Subtrahend);
+                Result = (uint64_t)Minuend + (uint64_t)(-(uint32_t)Subtrahend); /* C is beautiful */
                 WriteData(M68k, SrcLocation, Result, Size);
             }
             else /* Reg -= <ea> */
