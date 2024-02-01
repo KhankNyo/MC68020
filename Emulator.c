@@ -391,13 +391,6 @@ static void Push(MC68020 *M68k, uint32_t Data)
     M68k->Write(M68k, M68k->R[15], Data, 4);
 }
 
-static uint32_t Pop(MC68020 *M68k)
-{
-    uint32_t Data = M68k->Read(M68k, M68k->R[15], 4);
-    M68k->R[15] += 4;
-    return Data;
-}
-
 static void ReadList(MC68020 *M68k, uint16_t RegisterList, uint32_t Address, unsigned DataSize)
 {
     ASSERT_SIZE(DataSize);
