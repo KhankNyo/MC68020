@@ -648,7 +648,7 @@ void MC68020Execute(MC68020 *M68k)
             {
                 int32_t PC = M68k->PC; /* addr of DBcc + 2 */
                 int32_t Offset = SEX(32, 16)FETCH_IMMEDIATE(M68k, 2);
-                if (Cond) /* do nothing is cond is true */
+                if (Cond) /* do nothing if cond is true */
                     break;
 
                 /* subtract low word of register by 1 */
