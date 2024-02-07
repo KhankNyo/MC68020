@@ -30,18 +30,50 @@ start:
     movea #7, sp    ;  test 7: sbcd result 
     bne failed
 
+    movea #8, sp    ; test 8: long sbcd 
     moveq #0, d0    ; clear X flag
     addx d0, d0
-    movea #8, sp    ; test 8: long sbcd 
     lea (minuend + 4), a0
     lea (subtrahend + 4), a1
     sbcd -(a1), -(a0)
     sbcd -(a1), -(a0)
     sbcd -(a1), -(a0)
     sbcd -(a1), -(a0)
-    move.l #$00453973, d0
+    move.l #$0045_3973, d0
     move.l (minuend), d1
     cmp.l d1, d0
+    bne failed
+
+    movea #9, sp    ; test 9: abcd
+    moveq #0, d0
+    addx d0, d0     ; clear X flag
+    moveq #$15, d0
+    moveq #$17, d1
+    abcd d0, d1
+    cmp.b #$32, d1
+    bne failed
+
+    movea #10, sp   ; test 10: abcd long 
+    moveq #0, d0    ; clear X flag
+    addx d0, d0
+    lea (add_A + 4), a0
+    lea (add_B + 4), a1
+    abcd -(a1), -(a0)
+    abcd -(a1), -(a0)
+    abcd -(a1), -(a0)
+    abcd -(a1), -(a0)
+    move.l (a0), d0
+    cmp.l #$0155_4127, d0
+    bne failed
+
+    moveq #0, d0    ; clear X flag
+    addx d0, d0
+    moveq #$73, d0
+    moveq #$27, d1
+    abcd d0, d1
+    movea #11, sp   ; test 11: abcd with carry
+    bcc failed
+    movea #12, sp   ; test 12: abcd == 0
     bne failed
 
     ; passed 

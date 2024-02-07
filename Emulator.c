@@ -528,17 +528,15 @@ static unsigned BCDSub(MC68020 *M68k, uint8_t Dst, uint8_t Src)
 static unsigned BCDAdd(MC68020 *M68k, uint8_t Dst, uint8_t Src)
 {
     unsigned Carry = GET_FLAG(M68k, FLAG_X);
-    /* is low nibble gonna carry in base 10? */
-    if ((Dst & 0xF) + (Src & 0xF) + Carry > 9)
-    {
-        Carry = 6; /* then carry the whole way in hex */
-    }
-    unsigned Result = Dst + Src + Carry;
-    if ((Result & 0x0FF0) > 9) /* high nibble carry? */
-    {
-        Result += 0x60;
-    }
+    uint8_t LowNibble = (Dst & 0xF) + (Src & 0xF) + Carry;
+    if (LowNibble > 9) /* decimal carry? */
+        LowNibble += 6;
 
+    unsigned HighNibble = (Dst & 0xF0) + (Src & 0xF0) + (LowNibble & 0xF0);
+    if (HighNibble > 0x90) /* decimal carry */
+        HighNibble += 0x60;
+
+    unsigned Result = HighNibble | (LowNibble & 0xF);
     SET_FLAG(M68k, FLAG_Z, (Result & 0xFF) == 0);
     SET_FLAG(M68k, FLAG_C, Result >> 8);
     SET_FLAG(M68k, FLAG_X, Result >> 8);
@@ -977,8 +975,22 @@ void MC68020Execute(MC68020 *M68k)
             TestCommonDataFlags(M68k, Product, 4);
             M68k->R[LeftReg] = Dst;
         }
-        else if (0) /* ABCD */
+        else if ((Opcode & 0x01F0) == 0x0100) /* ABCD */
         {
+            unsigned Size = 1;
+            if (Opcode & 0x8) /* -(An) */
+            {
+                uint8_t Src = M68k->Read(M68k, --M68k->R[Reg + 8], Size);
+                uint8_t Dst = M68k->Read(M68k, --M68k->R[LeftReg + 8], Size);
+                unsigned Result = BCDAdd(M68k, Dst, Src);
+                M68k->Write(M68k, M68k->R[LeftReg + 8], Result, Size);
+            }
+            else /* Dn */
+            {
+                uint32_t *Dst = &M68k->R[LeftReg];
+                unsigned Result = BCDAdd(M68k, *Dst, M68k->R[Reg]);
+                *Dst = Blend32(*Dst, Result, Size);
+            }
         }
         else if (0) /* EXG */
         {
