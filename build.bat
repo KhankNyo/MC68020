@@ -2,7 +2,7 @@
 
 
 set "CC=gcc"
-set "CCFLAGS=-O2 -Wall -Wextra -Wpedantic -Wno-missing-braces -IInclude -Wno-unused-local-typedefs"
+set "CCFLAGS=-Og -ggdb -Wall -Wextra -Wpedantic -Wno-missing-braces -IInclude -Wno-unused-local-typedefs"
 set "LDFLAGS= -flto "
 set "LIBS= "
 

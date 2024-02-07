@@ -504,29 +504,32 @@ static uint32_t M68kShift(MC68020 *M68k,
 
 static unsigned BCDSub(MC68020 *M68k, uint8_t Dst, uint8_t Src)
 {
-    unsigned Carry = 0;
-    if ((Dst & 0xF) < (Src & 0xF)) /* carry from low nibble? */
+    unsigned Carry = GET_FLAG(M68k, FLAG_X);
+    uint8_t LowNibble = (Dst & 0xF) - (Src & 0xF) - Carry;
+    unsigned CarryFromLowNibble = 0;
+    if ((Dst & 0xF) < (Src & 0xF) + Carry) /* overflow? */
     {
-        Dst += 10;
-        Carry = 0x10;
-    }
-    unsigned Result = Dst - Src - Carry;
-    if ((Result & 0x0FF0) > 9) /* high nibble carry? */ 
-    {
-        Result -= 0x60;
+        LowNibble += 10;
+        CarryFromLowNibble = 0x10;
     }
 
+    unsigned HighNibble = (Dst & 0xF0) - (Src & 0xF0) - CarryFromLowNibble;
+    if (HighNibble > 0x90)
+        HighNibble -= 0x60;
+
+    unsigned Result = HighNibble | (LowNibble & 0xF);
+    unsigned HasCarry = Result & 0x100;
+    SET_FLAG(M68k, FLAG_C, HasCarry);
+    SET_FLAG(M68k, FLAG_X, HasCarry);
     SET_FLAG(M68k, FLAG_Z, (Result & 0xFF) == 0);
-    SET_FLAG(M68k, FLAG_C, !(Result >> 8));
-    SET_FLAG(M68k, FLAG_X, !(Result >> 8));
     return Result;
 }
 
 static unsigned BCDAdd(MC68020 *M68k, uint8_t Dst, uint8_t Src)
 {
-    unsigned Carry = 0;
+    unsigned Carry = GET_FLAG(M68k, FLAG_X);
     /* is low nibble gonna carry in base 10? */
-    if ((Dst & 0xF) + (Src & 0xF) > 9)
+    if ((Dst & 0xF) + (Src & 0xF) + Carry > 9)
     {
         Carry = 6; /* then carry the whole way in hex */
     }
@@ -546,6 +549,8 @@ static unsigned BCDAdd(MC68020 *M68k, uint8_t Dst, uint8_t Src)
 void MC68020Execute(MC68020 *M68k)
 {
     uint16_t Opcode = FETCH_OPCODE(M68k);
+    unsigned Mode = 07 & (Opcode >> 3),
+             Reg = 07 & Opcode;
     switch (Opcode >> 12)
     {
     case 0:
@@ -556,8 +561,6 @@ void MC68020Execute(MC68020 *M68k)
     case 3: Move(M68k, Opcode, 2); break;
     case 4:
     {
-        unsigned Mode = 07 & (Opcode >> 3),
-                 Reg = 07 & (Opcode & 07);
         if ((Opcode & 0x0B80) == 0x0880) /* MOVEM, EXT */
         {
             unsigned LongSize = Opcode & 0x0040;
@@ -638,7 +641,7 @@ void MC68020Execute(MC68020 *M68k)
             {
                 DataLocation Location = GetLocation(M68k, Mode, Reg, 1);
                 uint8_t Data = GetDataFromLocation(M68k, Location, 1);
-                unsigned Result = BCDSub(M68k, 0, Data + GET_FLAG(M68k, FLAG_X));
+                unsigned Result = BCDSub(M68k, 0, Data);
                 WriteData(M68k, Location, Result, 1);
             }
             else if (Mode == 0) /* SWAP */
@@ -667,10 +670,7 @@ void MC68020Execute(MC68020 *M68k)
     } break;
     case 5: /* ADDQ, SUBQ, Scc, DBcc */
     {
-        unsigned Mode = 07 & (Opcode >> 3),
-                 Reg = 07 & Opcode,
-                 EncodedSize = 03 & (Opcode >> 6);
-
+        unsigned EncodedSize = 03 & (Opcode >> 6);
         if (03 != EncodedSize) /* ADDQ, SUBQ */
         {
             unsigned Size = 1 << EncodedSize;
@@ -746,27 +746,30 @@ void MC68020Execute(MC68020 *M68k)
     } break;
     case 8: /* DIVU, DIVS, OR, SBCD */
     {
-        unsigned Dn = 07 & (Opcode >> 9),
-                 Xn = 07 & (Opcode), 
-                 Mode = 07 & (Opcode >> 4);
+        unsigned Dn = 07 & (Opcode >> 9);
         if ((Opcode & 0x00C0) == 0x0C0) /* DIVU/S */
         {
-            uint16_t Divisor = 0xFFFF & M68k->R[Dn];
+            uint16_t Divisor = GetData(M68k, Mode, Reg, 2);
             if (Divisor == 0)
             {
                 /* TODO: trap */
+                UNREACHABLE("TODO: trap on division by 0");
             }
 
-            DataLocation Location = GetLocation(M68k, Mode, Xn, 4);
-            uint32_t Dividend = GetDataFromLocation(M68k, Location, 4);
+            uint32_t Dividend = M68k->R[Dn];
             uint32_t Quotient, Remainder;
             bool Overflow = false;
             if (Opcode & 0x0100) /* DIVS */
             {
-                int32_t ExtendedDivisor = SEX(32, 16)Divisor;
-                Quotient = (int32_t)Dividend / ExtendedDivisor;
-                Remainder = Abs((int32_t)Dividend) % Abs(ExtendedDivisor);
-                Overflow = !IN_I16(Quotient);
+                int32_t SignedDivisor = SEX(32, 16)Divisor;
+                int32_t SignedDividend = (int32_t)Dividend;
+                int32_t SignedQuotient = SignedDividend / SignedDivisor;
+                Remainder = Abs(SignedDividend) % Abs(SignedDivisor);
+                if (SignedDividend < 0)
+                    Remainder = -Remainder;
+
+                Overflow = !IN_I16(SignedQuotient);
+                Quotient = SignedQuotient;
             }
             else /* DIVU */
             {
@@ -782,22 +785,21 @@ void MC68020Execute(MC68020 *M68k)
             }
 
             TestCommonDataFlags(M68k, Quotient, 2);
-            uint32_t Result = Blend32(Remainder, Quotient, 2);
-            WriteData(M68k, Location, Result, 4);
+            M68k->R[Dn] = Blend32(Remainder << 16, Quotient, 2);
         }
         else if ((Opcode & 0x01F0) == 0x0100) /* SBCD */
         {
             unsigned Size = 1;
             if (Opcode & 8) /* -(An) mode */
             {
-                uint8_t Src = M68k->Read(M68k, --M68k->R[Xn + 8], Size);
+                uint8_t Src = M68k->Read(M68k, --M68k->R[Reg + 8], Size);
                 uint8_t Dst = M68k->Read(M68k, --M68k->R[Dn + 8], Size);
                 unsigned Result = BCDSub(M68k, Dst, Src);
                 M68k->Write(M68k, M68k->R[Dn + 8], Result, Size);
             }
             else /* Dn mode */
             {
-                unsigned Result = BCDSub(M68k, M68k->R[Dn], M68k->R[Xn]);
+                unsigned Result = BCDSub(M68k, M68k->R[Dn], M68k->R[Reg]);
                 M68k->R[Dn] = Blend32(M68k->R[Dn], Result, Size);
             }
         }
@@ -806,7 +808,7 @@ void MC68020Execute(MC68020 *M68k)
             unsigned EncodedSize = 07 & (Opcode >> 9);
             unsigned DecodedSize = 1 << EncodedSize;
 
-            DataLocation Location = GetLocation(M68k, Mode, Xn, DecodedSize);
+            DataLocation Location = GetLocation(M68k, Mode, Reg, DecodedSize);
             uint32_t Data = GetDataFromLocation(M68k, Location, DecodedSize);
             uint32_t RegData = MASK(M68k->R[Dn], DecodedSize);
             uint32_t Result = Data | RegData;
@@ -824,9 +826,7 @@ void MC68020Execute(MC68020 *M68k)
     } break;
     case 9: /* SUB, SUBA, SUBX */
     {
-        unsigned Mode = 07 & (Opcode >> 3),
-                 Reg = 07 & (Opcode),
-                 EncodedSize = 03 & (Opcode >> 6),
+        unsigned EncodedSize = 03 & (Opcode >> 6),
                  LeftReg = 07 & (Opcode >> 9);
         if (EncodedSize == 03) /* SUBA */
         {
@@ -903,9 +903,7 @@ void MC68020Execute(MC68020 *M68k)
     } break;
     case 11: /* CMP, CMPA, CMPM, EOR */
     {
-        unsigned Mode = 07 & (Opcode >> 3),
-                 Reg = 07 & (Opcode & 07),
-                 EncodedSize = 03 & (Opcode >> 6),
+        unsigned EncodedSize = 03 & (Opcode >> 6),
                  LeftReg = 07 & (Opcode >> 9);
         unsigned Size = 1 << EncodedSize;
         if (03 == EncodedSize) /* CMPA */
@@ -955,11 +953,43 @@ void MC68020Execute(MC68020 *M68k)
             WriteData(M68k, DstLocation, Result, Size);
         }
     } break;
+    case 12: /* MULU, MULS, ABCD, AND */
+    {
+        unsigned EncodedSize = 03 & (Opcode >> 6),
+                 LeftReg = 07 & (Opcode >> 9);
+        if (EncodedSize == 03) /* MULU/S */
+        {
+            uint16_t Src = GetData(M68k, Mode, Reg, 2);
+            uint16_t Dst = 0xFFFF & M68k->R[LeftReg];
+            uint32_t Product;
+
+            if (Opcode & 0x0100) /* MULS */
+            {
+                int32_t SignedDst = SEX(32, 16)Dst;
+                int32_t SignedSrc = SEX(32, 16)Src;
+                Product = SignedDst * SignedSrc;
+            }
+            else /* MULU */
+            {
+                Product = (uint32_t)Dst * (uint32_t)Src;
+            }
+
+            TestCommonDataFlags(M68k, Product, 4);
+            M68k->R[LeftReg] = Dst;
+        }
+        else if (0) /* ABCD */
+        {
+        }
+        else if (0) /* EXG */
+        {
+        }
+        else /* AND */
+        {
+        }
+    } break;
     case 13: /* ADD, ADDX, ADDA */
     {
-        unsigned Mode = 07 & (Opcode >> 3),
-                 Reg = 07 & (Opcode & 07),
-                 EncodedSize = 03 & (Opcode >> 6),
+        unsigned EncodedSize = 03 & (Opcode >> 6),
                  LeftReg = 07 & (Opcode >> 9);
         if (EncodedSize == 03) /* ADDA */
         {
@@ -1022,11 +1052,9 @@ void MC68020Execute(MC68020 *M68k)
     } break;
     case 14: /* shift instructions */
     {
-        unsigned Reg = Opcode & 07;
         unsigned Size = 03 & (Opcode >> 6);
         if (03 == Size) /* shift word by 1 */ 
         {
-            unsigned Mode = 07 & (Opcode >> 3);
             DataLocation Location = GetLocation(M68k, Mode, Reg, 2);
             uint32_t Data = GetDataFromLocation(M68k, Location, 2);
             uint32_t Result = M68kShift(M68k, 

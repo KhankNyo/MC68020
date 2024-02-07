@@ -793,7 +793,8 @@ SmallStr DisassembleSingleInstruction(DisasmBuffer *Dis, uint16_t Opcode, uint32
         unsigned LeftReg = (Opcode >> 9) & 07;
         if ((Opcode & 0xC0) == 0xC0) /* DIVU/S */
         {
-            unsigned Mode = Opcode >> 3, Reg = Opcode;
+            unsigned Mode = Opcode >> 3, 
+                     Reg = Opcode;
             const char *Mnemonic = Opcode & 0x0100? "divs": "divu";
             SmallStr Src = DisasmModeReg(Dis, Mode, Reg, 2);
             SmallStrFmt(Instruction, "%s.w %s, %s", Mnemonic, Src.Data, sRegisterName[LeftReg]);
