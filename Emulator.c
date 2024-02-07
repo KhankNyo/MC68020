@@ -272,7 +272,6 @@ static uint32_t Blend32(uint32_t Dst, uint32_t Data, unsigned Size)
 static void WriteDataToReg(MC68020 *M68k, unsigned RegisterIndex, uint32_t Data, unsigned Size)
 {
     RegisterIndex &= 0xF;
-    uint32_t Dst = M68k->R[RegisterIndex];
     if (RegisterIndex >= 8) /* store whole register if dst is an addr reg */
     {
         if (Size == 2)
@@ -281,7 +280,8 @@ static void WriteDataToReg(MC68020 *M68k, unsigned RegisterIndex, uint32_t Data,
     }
     else /* mix old content with new if it's a data reg */
     {
-        M68k->R[RegisterIndex] = Blend32(Dst, Data, Size);
+        uint32_t *Dst = &M68k->R[RegisterIndex];
+        *Dst = Blend32(*Dst, Data, Size);
     }
 }
 
@@ -409,25 +409,29 @@ static void ReadList(MC68020 *M68k, uint16_t RegisterList, uint32_t Address, uns
 static uint32_t M68kShift(MC68020 *M68k, 
     uint32_t Data, unsigned SizeInBits, unsigned ShiftCount, unsigned ShiftOpcode, unsigned DirectionIsLeft)
 {
-    ASSERT(SizeInBits == 8 || SizeInBits == 16 || SizeInBits == 32);
-    typedef enum ShiftType 
+    enum ShiftType 
     {
         ARITH_SHIFT,
         LOGICAL_SHIFT,
         ROTATE_X,
         ROTATE,
-    } ShiftType;
+    };
+    ASSERT(SizeInBits == 8 || SizeInBits == 16 || SizeInBits == 32);
+
+    /* mask data by size */
     ShiftOpcode &= 03;
     uint32_t BitMask = BITMASK(SizeInBits);
     Data &= BitMask;
 
+    /* all shifts clear V flag */
     SET_FLAG(M68k, FLAG_V, 0);
+
+    /* do the shift */
     uint32_t Result, 
              RotatedPortion = 0, 
              LastBit;
     unsigned InverseShiftCount = SizeInBits - ShiftCount;
     InverseShiftCount &= SizeInBits - 1;
-    /* do the shift */
     if (DirectionIsLeft)
     {
         Result = Data << ShiftCount;
@@ -441,6 +445,7 @@ static uint32_t M68kShift(MC68020 *M68k,
             }
             else if (ROTATE_X == ShiftOpcode)
             {
+                /* make room for the X flag being shifted in first */
                 RotatedPortion >>= 1;
                 Result |= RotatedPortion | (GET_FLAG(M68k, FLAG_X) << (ShiftCount - 1));
             }
@@ -471,11 +476,15 @@ static uint32_t M68kShift(MC68020 *M68k,
             }
             else if (ROTATE_X == ShiftOpcode)
             {
+                /* make room for the X flag begin shifted in first */
                 RotatedPortion <<= 1;
                 Result |= RotatedPortion | (GET_FLAG(M68k, FLAG_X) << InverseShiftCount);
             }
         }
     }
+
+    /* mask result by size */
+    Result &= BitMask;
 
     /* set flags */
     if (ShiftCount != 0)
@@ -488,11 +497,48 @@ static uint32_t M68kShift(MC68020 *M68k,
     {
         SET_FLAG(M68k, FLAG_C, GET_TRUTHY_FLAG(M68k, FLAG_X));
     }
-
-
-    Result &= BitMask;
     SET_FLAG(M68k, FLAG_Z, Result == 0);
     SET_FLAG(M68k, FLAG_N, Result & (1 << (SizeInBits - 1)));
+    return Result;
+}
+
+static unsigned BCDSub(MC68020 *M68k, uint8_t Dst, uint8_t Src)
+{
+    unsigned Carry = 0;
+    if ((Dst & 0xF) < (Src & 0xF)) /* carry from low nibble? */
+    {
+        Dst += 10;
+        Carry = 0x10;
+    }
+    unsigned Result = Dst - Src - Carry;
+    if ((Result & 0x0FF0) > 9) /* high nibble carry? */ 
+    {
+        Result -= 0x60;
+    }
+
+    SET_FLAG(M68k, FLAG_Z, (Result & 0xFF) == 0);
+    SET_FLAG(M68k, FLAG_C, !(Result >> 8));
+    SET_FLAG(M68k, FLAG_X, !(Result >> 8));
+    return Result;
+}
+
+static unsigned BCDAdd(MC68020 *M68k, uint8_t Dst, uint8_t Src)
+{
+    unsigned Carry = 0;
+    /* is low nibble gonna carry in base 10? */
+    if ((Dst & 0xF) + (Src & 0xF) > 9)
+    {
+        Carry = 6; /* then carry the whole way in hex */
+    }
+    unsigned Result = Dst + Src + Carry;
+    if ((Result & 0x0FF0) > 9) /* high nibble carry? */
+    {
+        Result += 0x60;
+    }
+
+    SET_FLAG(M68k, FLAG_Z, (Result & 0xFF) == 0);
+    SET_FLAG(M68k, FLAG_C, Result >> 8);
+    SET_FLAG(M68k, FLAG_X, Result >> 8);
     return Result;
 }
 
@@ -522,7 +568,7 @@ void MC68020Execute(MC68020 *M68k)
                 {
                     M68k->R[Reg] = SEX(32, 16)Data;
                 }
-                else /* sign extend byte to word */
+                else /* sign extend byte to word, blend high word with data to form result */
                 {
                     M68k->R[Reg] = Blend32(M68k->R[Reg], SEX(16, 8)Data, 2);
                 }
@@ -590,7 +636,10 @@ void MC68020Execute(MC68020 *M68k)
         {
             if ((Opcode & (1 << 6)) == 0) /* NBCD */
             {
-                /* TODO: NBCD */
+                DataLocation Location = GetLocation(M68k, Mode, Reg, 1);
+                uint8_t Data = GetDataFromLocation(M68k, Location, 1);
+                unsigned Result = BCDSub(M68k, 0, Data + GET_FLAG(M68k, FLAG_X));
+                WriteData(M68k, Location, Result, 1);
             }
             else if (Mode == 0) /* SWAP */
             {
@@ -641,7 +690,7 @@ void MC68020Execute(MC68020 *M68k)
                 Result, Dst, Data, Size
             );
         }
-        else
+        else /* DBcc, Scc */
         {
             unsigned Cond = CondIsTrue(M68k, 0xF & (Opcode >> 8));
             if (MODE_AN == Mode) /* DBcc */
@@ -695,10 +744,88 @@ void MC68020Execute(MC68020 *M68k)
         M68k->R[Dn] = Immediate;
         TestCommonDataFlags(M68k, Immediate, 4);
     } break;
+    case 8: /* DIVU, DIVS, OR, SBCD */
+    {
+        unsigned Dn = 07 & (Opcode >> 9),
+                 Xn = 07 & (Opcode), 
+                 Mode = 07 & (Opcode >> 4);
+        if ((Opcode & 0x00C0) == 0x0C0) /* DIVU/S */
+        {
+            uint16_t Divisor = 0xFFFF & M68k->R[Dn];
+            if (Divisor == 0)
+            {
+                /* TODO: trap */
+            }
+
+            DataLocation Location = GetLocation(M68k, Mode, Xn, 4);
+            uint32_t Dividend = GetDataFromLocation(M68k, Location, 4);
+            uint32_t Quotient, Remainder;
+            bool Overflow = false;
+            if (Opcode & 0x0100) /* DIVS */
+            {
+                int32_t ExtendedDivisor = SEX(32, 16)Divisor;
+                Quotient = (int32_t)Dividend / ExtendedDivisor;
+                Remainder = Abs((int32_t)Dividend) % Abs(ExtendedDivisor);
+                Overflow = !IN_I16(Quotient);
+            }
+            else /* DIVU */
+            {
+                Quotient = Dividend / Divisor;
+                Remainder = Dividend % Divisor;
+                Overflow = Quotient > UINT16_MAX;
+            }
+
+            if (Overflow)
+            {
+                SET_FLAG(M68k, FLAG_V, 1);
+                break; /* does not do writeback */
+            }
+
+            TestCommonDataFlags(M68k, Quotient, 2);
+            uint32_t Result = Blend32(Remainder, Quotient, 2);
+            WriteData(M68k, Location, Result, 4);
+        }
+        else if ((Opcode & 0x01F0) == 0x0100) /* SBCD */
+        {
+            unsigned Size = 1;
+            if (Opcode & 8) /* -(An) mode */
+            {
+                uint8_t Src = M68k->Read(M68k, --M68k->R[Xn + 8], Size);
+                uint8_t Dst = M68k->Read(M68k, --M68k->R[Dn + 8], Size);
+                unsigned Result = BCDSub(M68k, Dst, Src);
+                M68k->Write(M68k, M68k->R[Dn + 8], Result, Size);
+            }
+            else /* Dn mode */
+            {
+                unsigned Result = BCDSub(M68k, M68k->R[Dn], M68k->R[Xn]);
+                M68k->R[Dn] = Blend32(M68k->R[Dn], Result, Size);
+            }
+        }
+        else /* OR */
+        {
+            unsigned EncodedSize = 07 & (Opcode >> 9);
+            unsigned DecodedSize = 1 << EncodedSize;
+
+            DataLocation Location = GetLocation(M68k, Mode, Xn, DecodedSize);
+            uint32_t Data = GetDataFromLocation(M68k, Location, DecodedSize);
+            uint32_t RegData = MASK(M68k->R[Dn], DecodedSize);
+            uint32_t Result = Data | RegData;
+            TestCommonDataFlags(M68k, Result, DecodedSize);
+
+            if (Opcode & 0x0100) /* OR Dn, <ea> */
+            {
+                WriteData(M68k, Location, Result, DecodedSize);
+            }
+            else /* OR <ea>, Dn */
+            {
+                M68k->R[Dn] = Blend32(RegData, Result, DecodedSize);
+            }
+        }
+    } break;
     case 9: /* SUB, SUBA, SUBX */
     {
         unsigned Mode = 07 & (Opcode >> 3),
-                 Reg = 07 & (Opcode & 07),
+                 Reg = 07 & (Opcode),
                  EncodedSize = 03 & (Opcode >> 6),
                  LeftReg = 07 & (Opcode >> 9);
         if (EncodedSize == 03) /* SUBA */
@@ -719,9 +846,9 @@ void MC68020Execute(MC68020 *M68k)
             unsigned Size = 1 << EncodedSize;
             if (Opcode & 0x8) /* (-An) mode */
             {
-                uint32_t B = GetData(M68k, MODE_PREDEC, Reg + 8, Size);
-                DataLocation Dst = GetLocation(M68k, MODE_PREDEC, LeftReg + 8, Size);
+                DataLocation Dst = GetLocation(M68k, MODE_PREDEC, LeftReg, Size);
                 uint32_t A = GetDataFromLocation(M68k, Dst, Size);
+                uint32_t B = GetData(M68k, MODE_PREDEC, Reg, Size);
                 /* C is awesome */
                 uint64_t Result = (uint64_t)A + -(uint32_t)B + -(uint32_t)GET_FLAG(M68k, FLAG_X);
 
@@ -852,27 +979,26 @@ void MC68020Execute(MC68020 *M68k)
             unsigned Size = 1 << EncodedSize;
             if (Opcode & 0x8) /* (-An) mode */
             {
-                uint32_t B = GetData(M68k, MODE_PREDEC, Reg + 8, Size);
-                DataLocation Dst = GetLocation(M68k, MODE_PREDEC, LeftReg + 8, Size);
+                DataLocation Dst = GetLocation(M68k, MODE_PREDEC, LeftReg, Size);
                 uint32_t A = GetDataFromLocation(M68k, Dst, Size);
+                uint32_t B = GetData(M68k, MODE_PREDEC, Reg, Size);
                 uint64_t Result = (uint64_t)A + (uint64_t)B + (uint64_t)GET_FLAG(M68k, FLAG_X);
-
-                WriteData(M68k, Dst, Result, Size);
                 TestCommonAdditionFlags(M68k, 
                     GET_TRUTHY_FLAG(M68k, FLAG_Z) && 0 == MASK(Result, Size), 
                     Result, A, B, Size
                 );
+                WriteData(M68k, Dst, Result, Size);
             }
             else /* Dn mode */
             {
                 uint32_t A = GetDataFromReg(M68k, LeftReg, Size),
                          B = GetDataFromReg(M68k, Reg, Size);
                 uint64_t Result = (uint64_t)A + (uint64_t)B + (uint64_t)GET_FLAG(M68k, FLAG_X);
-                WriteDataToReg(M68k, LeftReg, Result, Size);
                 TestCommonAdditionFlags(M68k, 
                     0 == MASK(Result, Size),
                     Result, A, B, Size
                 );
+                WriteDataToReg(M68k, LeftReg, Result, Size);
             }
         }
         else /* ADD */

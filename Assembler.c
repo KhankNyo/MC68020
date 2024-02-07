@@ -2428,7 +2428,7 @@ static void EmitEaExtension(M68kAssembler *Assembler, EaEncoding Encoding)
 {
     if (Encoding.HasImmediate)
     {
-        Emit(Assembler, Encoding.u.Immediate, Encoding.Size);
+        Emit(Assembler, Encoding.u.Immediate, uMax(Encoding.Size, 2));
     }
 
     if (Encoding.Extension == NO_EXTENSION)

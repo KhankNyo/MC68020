@@ -121,6 +121,14 @@ static inline uint16_t ReverseBits16(uint16_t n)
         | ((uint16_t)ReversedVersion[(n >> 12) & 0xF]);
 }
 
+static inline int64_t Abs(int64_t a)
+{
+    /* compiler will use the optimal trick (neg-cmovs or cdq-xor-sub) */
+    if (a < 0) 
+        return -a;
+    return a;
+}
+
 
 #endif /* COMMON_H */
 
