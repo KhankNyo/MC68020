@@ -973,7 +973,7 @@ void MC68020Execute(MC68020 *M68k)
             }
 
             TestCommonDataFlags(M68k, Product, 4);
-            M68k->R[LeftReg] = Dst;
+            M68k->R[LeftReg] = Product;
         }
         else if ((Opcode & 0x01F0) == 0x0100) /* ABCD */
         {
