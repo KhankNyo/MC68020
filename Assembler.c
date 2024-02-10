@@ -3585,9 +3585,9 @@ static void ConsumeStatement(M68kAssembler *Assembler)
     case TOKEN_SBCD:
     {
         AssertSize(Assembler, &Instruction, 1);
-        Argument Y = ConsumeEa(Assembler, 2, 1);
-        CONSUME_COMMA();
         Argument X = ConsumeEa(Assembler, 2, 1);
+        CONSUME_COMMA();
+        Argument Y = ConsumeEa(Assembler, 2, 1);
 
         if (Y.Type != X.Type)
         {
@@ -3600,14 +3600,14 @@ static void ConsumeStatement(M68kAssembler *Assembler)
         if (X.Type == ARG_DATA_REG)
         {
             Opcode = LOOKUP_OPC(Type)
-                | ((uint32_t)X.As.Dn << 9) 
-                | Y.As.Dn;
+                | ((uint32_t)Y.As.Dn << 9) 
+                | X.As.Dn;
         }
         else if (X.Type == ARG_IND_PREDEC)
         {
             Opcode = LOOKUP_OPC(Type) | 0x08
-                | ((uint32_t)X.As.PreDec.An << 9)
-                | Y.As.PreDec.An;
+                | ((uint32_t)Y.As.PreDec.An << 9)
+                | X.As.PreDec.An;
         }
         else
         {
