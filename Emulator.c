@@ -587,11 +587,10 @@ void MC68020Execute(MC68020 *M68k)
                         ReadList(M68k, RegisterList, Address, Size);
 
                         /* NOTE:
-                         * for MC68000 and MC68010, only the initial value in Reg will be written if RegisterList contains Reg
-                         * for MC68020 or above, the written value will be 
-                         *  the initial value plus the size of the operation, aka the final addr 
+                         *  the content of Reg after the instruction finishes 
+                         *  will be Addr + Size even if Reg was in the register list
                          * */
-                        M68k->R[Reg + 8] = CountBits(RegisterList)*Size;
+                        M68k->R[Reg + 8] = Address + CountBits(RegisterList)*Size;
                     }
                     else
                     {
@@ -606,6 +605,15 @@ void MC68020Execute(MC68020 *M68k)
                 {
                     int i = 15; 
                     uint32_t Address = M68k->R[Reg + 8];
+                    ASSERT_SIZE(Size);
+
+                    /* NOTE:
+                     * MC68010, MC68000: 
+                     *      will write the initial value of Reg if Reg is in the register list.
+                     * MC68030 or above: 
+                     *      will write the (value of Reg) - (Size of Register list)
+                     * */
+                    M68k->R[Reg + 8] = Address - CountBits(RegisterList)*Size;
                     while (RegisterList)
                     {
                         if (RegisterList & 0x1)
@@ -617,13 +625,6 @@ void MC68020Execute(MC68020 *M68k)
                         i--;
                         RegisterList >>= 1;
                     }
-
-                    /* NOTE:
-                     * for MC68000 and MC68010, only the initial value in reg will be written if RegisterList contains Reg
-                     * for MC68020 or above, the written value will be 
-                     *  the initial value minus the size of the operation, aka the final addr 
-                     * */
-                    M68k->R[Reg + 8] = Address;
                 }
                 else /* reg->mem */
                 {
